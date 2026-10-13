@@ -1,0 +1,93 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_control_flow_attributes : enable
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_KHR_cooperative_matrix : require
+#extension GL_KHR_memory_scope_semantics : require
+#extension GL_KHR_shader_subgroup_basic : require
+
+// COOP MAT: FP16 A/B with FP32 accumulation
+// Packed GGUF loads, NHWC output, fused bias and dispatch offsets are adapters
+#include "../src/vulkan_ops.h"
+
+layout(local_size_x_id=0) in;
+layout(constant_id=0) const uint BLOCK_SIZE = VK_MATRIX_LANES;
+layout(constant_id=VK_COOP_MATRIX_SUBGROUP_SPECIALIZATION) const uint WARP = VK_MATRIX_VIRTUAL_WARP;
+
+#define BM VK_MATRIX_TILE
+#define BN VK_MATRIX_TILE
+#define WM VK_MATRIX_WARP_ROWS
+#define WN VK_MATRIX_WARP_COLUMNS
+#define TM VK_COOP_MATRIX_SHAPE
+#define TN VK_COOP_MATRIX_SHAPE
+#define TK VK_COOP_MATRIX_SHAPE
+#define BK VK_MATRIX_INNER_TILE
+layout(constant_id=VK_COOP_MATRIX_PAD_SPECIALIZATION) const uint SHARED_PAD = VK_COOP_MATRIX_SHARED_PAD;
+#define SHMEM_STRIDE (BK / 2 + SHARED_PAD)
+#define cms_per_row (WM / TM)
+#define cms_per_col (WN / TN)
+
+layout(set=0,binding=0,std430) readonly buffer A { float data_a[]; };
+layout(set=0,binding=1,std430) readonly buffer B { float bias[]; };
+layout(set=0,binding=3,std430) readonly buffer W { uint weights[]; };
+layout(set=0,binding=4,std430) writeonly buffer D { float data_d[]; };
+layout(push_constant) uniform Push { uint p[VK_PUSH_WORDS]; };
+
+#include "decode.glsl"
+
+shared f16vec2 buf_a[BM * SHMEM_STRIDE];
+shared f16vec2 buf_b[BN * SHMEM_STRIDE];
+shared float coopmat_stage[TM * TN * VK_COOP_MATRIX_SUBGROUPS];
+
+void main()
+{
+    uint group = gl_WorkGroupID.x + p[VK_PUSH_GROUP_BASE];
+    uint ir = group % p[VK_PUSH_GROUP_STRIDE],ic = group / p[VK_PUSH_GROUP_STRIDE];
+    uint warp = gl_SubgroupID,tid = gl_LocalInvocationID.x;
+    uint warp_r = warp % (BM / WM),warp_c = warp / (BM / WM);
+    uint loadr = tid % (BK / 2),loadc = tid / (BK / 2);
+    coopmat<float16_t,gl_ScopeSubgroup,TM,TK,gl_MatrixUseA> cache_a;
+    coopmat<float16_t,gl_ScopeSubgroup,TK,TN,gl_MatrixUseB> cache_b;
+    coopmat<float,gl_ScopeSubgroup,TM,TN,gl_MatrixUseAccumulator> sums[cms_per_row * cms_per_col];
+    [[unroll]] for (uint i = 0; i < cms_per_row * cms_per_col; i++) sums[i] = coopmat<float,gl_ScopeSubgroup,TM,TN,gl_MatrixUseAccumulator>(0);
+    for (uint block = 0; block < p[3]; block += BK) {
+        for (uint row = loadc; row < BM; row += BLOCK_SIZE * 2 / BK) {
+            uint index = ir * BM + row,feature = block + loadr * 2;
+            buf_a[row * SHMEM_STRIDE + loadr] = f16vec2(index < p[1] && feature < p[3]? weight_value(p[4],index * p[5],feature) : 0,index < p[1] && feature + 1 < p[3]? weight_value(p[4],index * p[5],feature + 1) : 0);
+        }
+        for (uint token = loadc; token < BN; token += BLOCK_SIZE * 2 / BK) {
+            uint index = ic * BN + token,feature = block + loadr * 2;
+            buf_b[token * SHMEM_STRIDE + loadr] = f16vec2(index < p[2] && feature < p[3]? data_a[index * p[3] + feature] : 0,index < p[2] && feature + 1 < p[3]? data_a[index * p[3] + feature + 1] : 0);
+        }
+        barrier();
+        [[unroll]] for (uint k = 0; k < BK; k += TK) {
+            [[unroll]] for (uint row = 0; row < cms_per_row; row++) {
+                coopMatLoad(cache_a,buf_a,(warp_r * WM + row * TM) * SHMEM_STRIDE + k / 2,SHMEM_STRIDE,gl_CooperativeMatrixLayoutRowMajor);
+                [[unroll]] for (uint col = 0; col < cms_per_col; col++) {
+                    coopMatLoad(cache_b,buf_b,(warp_c * WN + col * TN) * SHMEM_STRIDE + k / 2,SHMEM_STRIDE,gl_CooperativeMatrixLayoutColumnMajor);
+                    sums[col * cms_per_row + row] = coopMatMulAdd(cache_a,cache_b,sums[col * cms_per_row + row]);
+                }
+            }
+        }
+        barrier();
+    }
+    uint store_r = gl_SubgroupInvocationID % TM,store_c = gl_SubgroupInvocationID / TM;
+    [[unroll]] for (uint row = 0; row < cms_per_row; row++) {
+        [[unroll]] for (uint col = 0; col < cms_per_col; col++) {
+            uint first_row = ir * BM + warp_r * WM + row * TM;
+            uint first_token = ic * BN + warp_c * WN + col * TN;
+            if (p[8] == 0 && p[6] % VK_COOP_MATRIX_STORE_ALIGNMENT == 0 && p[7] % VK_COOP_MATRIX_STORE_ALIGNMENT == 0 && first_row + TM <= p[1] && first_token + TN <= p[2]) {
+                coopMatStore(sums[col * cms_per_row + row],data_d,p[7] + first_token * p[6] + first_row,p[6],gl_CooperativeMatrixLayoutColumnMajor);
+                continue;
+            }
+            coopMatStore(sums[col * cms_per_row + row],coopmat_stage,warp * TM * TN,TM,gl_CooperativeMatrixLayoutColumnMajor);
+            controlBarrier(gl_ScopeSubgroup,gl_ScopeSubgroup,gl_StorageSemanticsShared,gl_SemanticsAcquireRelease);
+            [[unroll]] for (uint c = store_c; c < TN; c += WARP / TM) {
+                uint output_row = ir * BM + warp_r * WM + row * TM + store_r;
+                uint output_token = ic * BN + warp_c * WN + col * TN + c;
+                if (output_row < p[1] && output_token < p[2]) data_d[p[7] + output_token * p[6] + output_row] = coopmat_stage[warp * TM * TN + c * TM + store_r] + (p[8] != 0? bias[output_row] : 0);
+            }
+            controlBarrier(gl_ScopeSubgroup,gl_ScopeSubgroup,gl_StorageSemanticsShared,gl_SemanticsAcquireRelease);
+        }
+    }
+}

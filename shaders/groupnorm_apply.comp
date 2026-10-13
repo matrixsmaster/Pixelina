@@ -1,0 +1,23 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "../src/vulkan_ops.h"
+
+layout(local_size_x=VK_COMPUTE_LANES) in;
+layout(set=0,binding=0,std430) readonly buffer Input { vec4 input_data[]; };
+layout(set=0,binding=1,std430) readonly buffer Weight { vec4 weight[]; };
+layout(set=0,binding=2,std430) readonly buffer Bias { vec4 bias[]; };
+layout(set=0,binding=3,std430) readonly buffer Statistics { float statistics[]; };
+layout(set=0,binding=4,std430) buffer Output { vec4 output_data[]; };
+layout(push_constant) uniform Push { uint p[VK_PUSH_WORDS]; };
+
+void main()
+{
+    uint item = (gl_WorkGroupID.x + p[VK_PUSH_GROUP_BASE]) * VK_COMPUTE_LANES + gl_LocalInvocationIndex;
+    if (item >= p[1] * p[2] / VK_GROUP_VECTOR) return;
+    uint channels = p[2] / VK_GROUP_VECTOR,features = channels / p[3];
+    uint feature = item % channels,group = feature / features;
+    // The backend checks group width alignment before dispatch, keeping every vector in one group.
+    float anchor = input_data[group * features].x;
+    vec4 centered = (input_data[item] - anchor) - statistics[group * VK_GROUP_FINAL_STATS_WORDS];
+    output_data[item] = centered * statistics[group * VK_GROUP_FINAL_STATS_WORDS + 1] * weight[feature] + bias[feature];
+}

@@ -1,0 +1,6 @@
+#ifndef PIXELINA_EMBED_H
+#define PIXELINA_EMBED_H
+
+#define EMBED_LINE_BYTES 16
+
+#endif

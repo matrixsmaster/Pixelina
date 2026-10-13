@@ -1,0 +1,168 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_control_flow_attributes : enable
+#extension GL_EXT_spirv_intrinsics : require
+
+// Has register tile and four K-block cache; packed-byte GGUF loading,
+// ordinary Q8_1 blocks, NHWC output, fused bias and workgroup ranges are adapters.
+#include "../src/vulkan_ops.h"
+
+// OpSDotKHR, packed 4x8 input
+// Use SPIR-V intrinsics so older glslc can compile the optimized kernel too.
+#define SPIRV_CAPABILITY_DOT_PACKED 6018
+#define SPIRV_CAPABILITY_DOT_PRODUCT 6019
+#define SPIRV_INSTRUCTION_SDOT 4450
+
+spirv_instruction(extensions=["SPV_KHR_integer_dot_product"],capabilities=[SPIRV_CAPABILITY_DOT_PACKED,SPIRV_CAPABILITY_DOT_PRODUCT],id=SPIRV_INSTRUCTION_SDOT)
+int packed_dot(int a, int b, spirv_literal uint format);
+
+#define dotPacked4x8EXT(a,b) packed_dot(a,b,0u)
+
+layout(local_size_x_id=0) in;
+layout(constant_id=0) const uint BLOCK_SIZE = VK_MATRIX_LANES;
+layout(constant_id=1) const uint BM = VK_MATRIX_TILE;
+layout(constant_id=2) const uint BN = VK_MATRIX_TILE;
+layout(constant_id=4) const uint WM = VK_MATRIX_WARP_ROWS;
+layout(constant_id=5) const uint WN = VK_MATRIX_WARP_COLUMNS;
+layout(constant_id=6) const uint WMITER = VK_MATRIX_ROW_ITERATIONS;
+layout(constant_id=7) const uint TM = VK_MATRIX_REGISTER_ROWS;
+layout(constant_id=8) const uint TN = VK_MATRIX_REGISTER_COLUMNS;
+layout(constant_id=VK_MMQ_SPECIALIZATION_TYPE) const uint TYPE = MODEL_Q8_0;
+
+#define BK VK_MATRIX_INNER_TILE
+#define WARP VK_MATRIX_VIRTUAL_WARP
+
+layout(set=0,binding=0,std430) readonly buffer A { uint data_a[]; };
+layout(set=0,binding=1,std430) readonly buffer B { float bias[]; };
+layout(set=0,binding=3,std430) readonly buffer W { uint weights[]; };
+layout(set=0,binding=4,std430) writeonly buffer D { float data_d[]; };
+layout(push_constant) uniform Push { uint p[VK_PUSH_WORDS]; };
+
+#include "decode.glsl"
+
+struct block_cache {
+    int qs[VK_MMQ_PACKED_WORDS]; // four signed eight-bit values per integer
+    vec2 dm; // scale/minimum, or two signed Q6_K scales
+};
+
+shared block_cache buf_a[BM * VK_MMQ_K_STEPS];
+shared block_cache buf_b[BN * VK_MMQ_K_STEPS];
+block_cache cache_a[WMITER * TM];
+block_cache cache_b;
+
+void block_a_to_shmem(uint buffer_index, uint row, uint feature, uint lane)
+{
+    uint packed = 0;
+    vec2 dm = vec2(0);
+    if (row < p[1] && feature < p[3]) {
+        uint offset = row * p[5];
+        uint base = offset + (feature / MODEL_QUANT_BLOCK) * (TYPE == MODEL_Q5_K? MODEL_Q5_BYTES : MODEL_Q6_BYTES);
+        uint group = (feature % MODEL_QUANT_BLOCK) / BK;
+        if (TYPE == MODEL_Q8_0) {
+            base = offset + (feature / BK) * MODEL_Q8_BYTES;
+            dm.x = weight_half(base);
+        } else if (TYPE == MODEL_Q5_K) {
+            uint scale,minimum;
+            if (group < 4) {
+                scale = weight_byte(base + 4 + group) & VK_Q5_SCALE_MASK;
+                minimum = weight_byte(base + 8 + group) & VK_Q5_SCALE_MASK;
+            } else {
+                scale = (weight_byte(base + 8 + group) & 15) | ((weight_byte(base + group) >> 6) << 4);
+                minimum = (weight_byte(base + 8 + group) >> 4) | ((weight_byte(base + 4 + group) >> 6) << 4);
+            }
+            dm = vec2(weight_half(base) * scale,weight_half(base + 2) * minimum);
+        } else {
+            uint scale = base + VK_Q6_SCALE_OFFSET + group * 2;
+            dm = weight_half(base + VK_Q6_DELTA_OFFSET) * vec2(signed_byte(weight_byte(scale)),signed_byte(weight_byte(scale + 1)));
+        }
+        for (uint j = 0; j < 4; j++) {
+            uint index = lane * 4 + j;
+            int value;
+            if (TYPE == MODEL_Q8_0) value = signed_byte(weight_byte(base + 2 + index));
+            else if (TYPE == MODEL_Q5_K) {
+                uint low = weight_byte(base + VK_Q5_LOW_OFFSET + (group / 2) * BK + index);
+                uint quant = group % 2 == 0? low & 15 : low >> 4;
+                quant |= ((weight_byte(base + VK_Q5_HIGH_OFFSET + index) >> group) & 1) << 4;
+                value = int(quant);
+            } else {
+                uint portion = group / 4,part = group % 4;
+                uint low = weight_byte(base + portion * BK * 2 + index + (part % 2) * BK);
+                uint quant = part < 2? low & 15 : low >> 4;
+                quant |= ((weight_byte(base + VK_Q6_HIGH_OFFSET + portion * BK + index) >> (part * 2)) & 3) << 4;
+                value = int(quant) - BK;
+            }
+            packed |= (uint(value) & 255) << (j * 8);
+        }
+    }
+    buf_a[buffer_index].qs[lane] = int(packed);
+    if (lane == 0) buf_a[buffer_index].dm = dm;
+}
+
+float mmq_dot_product(uint index)
+{
+    int sum0 = 0,sum1 = 0;
+    [[unroll]] for (uint j = 0; j < VK_MMQ_PACKED_WORDS / 2; j++) sum0 += dotPacked4x8EXT(cache_a[index].qs[j],cache_b.qs[j]);
+    [[unroll]] for (uint j = VK_MMQ_PACKED_WORDS / 2; j < VK_MMQ_PACKED_WORDS; j++) sum1 += dotPacked4x8EXT(cache_a[index].qs[j],cache_b.qs[j]);
+    if (TYPE == MODEL_Q6_K) return cache_b.dm.x * (cache_a[index].dm.x * sum0 + cache_a[index].dm.y * sum1);
+    return cache_b.dm.x * cache_a[index].dm.x * float(sum0 + sum1) - cache_a[index].dm.y * cache_b.dm.y;
+}
+
+void main()
+{
+    uint group = gl_WorkGroupID.x + p[VK_PUSH_GROUP_BASE];
+    uint ir = group % p[VK_PUSH_GROUP_STRIDE],ic = group / p[VK_PUSH_GROUP_STRIDE];
+    const uint WNITER = (WM * WN) / (WARP * TM * TN * WMITER);
+    const uint WSUBM = WM / WMITER,WSUBN = WN / WNITER;
+    uint tid = gl_LocalInvocationID.x,warp = tid / WARP,lane = tid % WARP;
+    uint tiwr = lane % (WSUBM / TM),tiwc = lane / (WSUBM / TM);
+    uint warp_r = warp % (BM / WM),warp_c = warp / (BM / WM);
+    uint loadr_a = tid % VK_MMQ_PACKED_WORDS,loadc_a = tid / VK_MMQ_PACKED_WORDS;
+    uint loadr_b = tid % 2,loadc_b = tid / 2;
+    float sums[WMITER * TM * WNITER * TN];
+    [[unroll]] for (uint i = 0; i < WMITER * TM * WNITER * TN; i++) sums[i] = 0;
+    for (uint block = 0; block < p[3]; block += BK * VK_MMQ_K_STEPS) {
+        for (uint row = loadc_a; row < BM; row += BLOCK_SIZE / VK_MMQ_PACKED_WORDS) {
+            [[unroll]] for (uint step = 0; step < VK_MMQ_K_STEPS; step++) block_a_to_shmem(step * BM + row,ir * BM + row,block + step * BK,loadr_a);
+        }
+        for (uint token = loadc_b; token < BN; token += BLOCK_SIZE / 2) {
+            [[unroll]] for (uint step = 0; step < VK_MMQ_K_STEPS; step++) {
+                uint cache = step * BN + token;
+                uint feature = block + step * BK;
+                bool valid = ic * BN + token < p[2] && feature < p[3];
+                uint source = ((ic * BN + token) * (p[3] / BK) + feature / BK) * VK_MMQ_BLOCK_WORDS;
+                [[unroll]] for (uint j = 0; j < VK_MMQ_PACKED_WORDS / 2; j++) {
+                    uint index = loadr_b * (VK_MMQ_PACKED_WORDS / 2) + j;
+                    buf_b[cache].qs[index] = valid? int(data_a[source + 1 + index]) : 0;
+                }
+                if (loadr_b == 0) buf_b[cache].dm = valid? unpackHalf2x16(data_a[source]) : vec2(0);
+            }
+        }
+        barrier();
+        [[unroll]] for (uint step = 0; step < VK_MMQ_K_STEPS; step++) {
+            [[unroll]] for (uint wsir = 0; wsir < WMITER; wsir++) {
+                [[unroll]] for (uint cr = 0; cr < TM; cr++) cache_a[wsir * TM + cr] = buf_a[step * BM + warp_r * WM + wsir * WSUBM + tiwr * TM + cr];
+            }
+            [[unroll]] for (uint wsic = 0; wsic < WNITER; wsic++) {
+                [[unroll]] for (uint cc = 0; cc < TN; cc++) {
+                    cache_b = buf_b[step * BN + warp_c * WN + wsic * WSUBN + tiwc * TN + cc];
+                    [[unroll]] for (uint wsir = 0; wsir < WMITER; wsir++) {
+                        [[unroll]] for (uint cr = 0; cr < TM; cr++) sums[(wsic * TN + cc) * WMITER * TM + wsir * TM + cr] += mmq_dot_product(wsir * TM + cr);
+                    }
+                }
+            }
+        }
+        barrier();
+    }
+    [[unroll]] for (uint wsic = 0; wsic < WNITER; wsic++) {
+        [[unroll]] for (uint wsir = 0; wsir < WMITER; wsir++) {
+            uint row = ir * BM + warp_r * WM + wsir * WSUBM + tiwr * TM;
+            uint token = ic * BN + warp_c * WN + wsic * WSUBN + tiwc * TN;
+            [[unroll]] for (uint cc = 0; cc < TN; cc++) {
+                [[unroll]] for (uint cr = 0; cr < TM; cr++) {
+                    uint index = (wsic * TN + cc) * WMITER * TM + wsir * TM + cr;
+                    if (row + cr < p[1] && token + cc < p[2]) data_d[p[7] + (token + cc) * p[6] + row + cr] = sums[index] + (p[8] != 0? bias[row + cr] : 0);
+                }
+            }
+        }
+    }
+}

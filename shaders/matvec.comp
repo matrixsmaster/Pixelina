@@ -1,0 +1,50 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+// mat x vec: four-element loads, multiple rows per group.
+#include "../src/vulkan_ops.h"
+
+layout(local_size_x=VK_COMPUTE_LANES) in;
+layout(set=0,binding=0,std430) readonly buffer A { float a[]; };
+layout(set=0,binding=1,std430) readonly buffer B { float b[]; };
+layout(set=0,binding=3,std430) readonly buffer W { uint weights[]; };
+layout(set=0,binding=4,std430) writeonly buffer D { float d[]; };
+layout(push_constant) uniform Push { uint p[VK_PUSH_WORDS]; };
+
+#include "decode.glsl"
+
+shared float reduction[VK_MATVEC_ROWS * VK_COMPUTE_LANES];
+
+void main()
+{
+    uint tid = gl_LocalInvocationID.x,first_row = (gl_WorkGroupID.x + p[VK_PUSH_GROUP_BASE]) * VK_MATVEC_ROWS;
+    float temp[VK_MATVEC_ROWS];
+    for (uint row = 0; row < VK_MATVEC_ROWS; row++) temp[row] = 0;
+    for (uint col = VK_MATVEC_ELEMENTS * tid; col < p[3]; col += VK_MATVEC_ELEMENTS * VK_COMPUTE_LANES) {
+        vec4 input_value = vec4(0);
+        for (uint i = 0; i < VK_MATVEC_ELEMENTS; i++) {
+            if (col + i < p[3]) input_value[i] = a[col + i];
+        }
+        for (uint row = 0; row < VK_MATVEC_ROWS; row++) {
+            if (first_row + row >= p[1]) break;
+            vec4 weight = vec4(0);
+            for (uint i = 0; i < VK_MATVEC_ELEMENTS; i++) {
+                if (col + i < p[3]) weight[i] = weight_value(p[4],(first_row + row) * p[5],col + i);
+            }
+            temp[row] += dot(weight,input_value);
+        }
+    }
+    for (uint row = 0; row < VK_MATVEC_ROWS; row++) reduction[row * VK_COMPUTE_LANES + tid] = temp[row];
+    barrier();
+    for (uint stride = VK_COMPUTE_LANES / 2; stride > 0; stride /= 2) {
+        if (tid < stride) {
+            for (uint row = 0; row < VK_MATVEC_ROWS; row++) reduction[row * VK_COMPUTE_LANES + tid] += reduction[row * VK_COMPUTE_LANES + tid + stride];
+        }
+        barrier();
+    }
+    if (tid == 0) {
+        for (uint row = 0; row < VK_MATVEC_ROWS; row++) {
+            if (first_row + row < p[1]) d[p[7] + first_row + row] = reduction[row * VK_COMPUTE_LANES] + (p[8] != 0? b[first_row + row] : 0);
+        }
+    }
+}

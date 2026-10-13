@@ -1,0 +1,126 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+// non-MMQ F32 vector query/key and value tiles
+// Pixelina uses shared reductions, NHWC strides and a fixed portable query tile.
+#include "../src/vulkan_ops.h"
+
+layout(local_size_x=VK_COMPUTE_LANES) in;
+layout(set=0,binding=0,std430) readonly buffer Q { float data_q[]; };
+layout(set=0,binding=1,std430) readonly buffer K { float data_k[]; };
+layout(set=0,binding=2,std430) readonly buffer V { float data_v[]; };
+layout(set=0,binding=4,std430) writeonly buffer O { float data_o[]; };
+layout(push_constant) uniform Push { uint p[VK_PUSH_WORDS]; };
+
+#define Br VK_ATTENTION_QUERY_TILE
+#define Bc VK_COMPUTE_LANES
+#define qf_stride (VK_ATTENTION_MAX_DIM / VK_ATTENTION_VECTOR + 1)
+#define output_chunks (VK_ATTENTION_MAX_DIM / (VK_COMPUTE_LANES * VK_ATTENTION_VECTOR))
+
+shared vec4 Qf[Br * qf_stride];
+shared float probabilities[Br * Bc];
+shared float tmpsh[VK_COMPUTE_LANES];
+
+float dot_product(vec4 x, vec4 y, float acc)
+{
+    return fma(x.x,y.x,fma(x.y,y.y,fma(x.z,y.z,fma(x.w,y.w,acc))));
+}
+
+float reduce(float value, bool maximum)
+{
+    uint tid = gl_LocalInvocationIndex;
+    tmpsh[tid] = value;
+    barrier();
+    for (uint s = VK_COMPUTE_LANES / 2; s > 0; s >>= 1) {
+        if (tid < s) tmpsh[tid] = maximum? max(tmpsh[tid],tmpsh[tid ^ s]) : tmpsh[tid] + tmpsh[tid ^ s];
+        barrier();
+    }
+    float result = tmpsh[0];
+    barrier();
+    return result;
+}
+
+void main()
+{
+    uint tid = gl_LocalInvocationIndex;
+    uint group = gl_WorkGroupID.x + p[VK_PUSH_GROUP_BASE];
+    uint rows = p[1],channels = p[2],heads = p[3],kv_heads = p[4];
+    uint first_query = (group / heads) * Br,head = group % heads;
+    if (first_query >= rows) return;
+    uint dimension = channels / heads,kv_head = head / (heads / kv_heads);
+    uint vectors = (dimension + VK_ATTENTION_VECTOR - 1) / VK_ATTENTION_VECTOR;
+    uint keys = p[6] != 0? min(p[5],first_query + Br) : p[5];
+    for (uint r = 0; r < Br; r++) {
+        for (uint d = tid; d < vectors; d += VK_COMPUTE_LANES) {
+            uint offset = (first_query + r) * channels + head * dimension + d * VK_ATTENTION_VECTOR;
+            vec4 value = vec4(0);
+            for (uint i = 0; i < VK_ATTENTION_VECTOR; i++) {
+                if (first_query + r < rows && d * VK_ATTENTION_VECTOR + i < dimension) value[i] = data_q[offset + i];
+            }
+            Qf[r * qf_stride + d] = value;
+        }
+    }
+    barrier();
+    float Mf[Br],Lf[Br];
+    vec4 Of[Br][output_chunks];
+    for (uint r = 0; r < Br; r++) {
+        Mf[r] = -uintBitsToFloat(VK_FLOAT_INFINITY);
+        Lf[r] = 0;
+        for (uint d = 0; d < output_chunks; d++) Of[r][d] = vec4(0);
+    }
+    for (uint base = 0; base < keys; base += Bc) {
+        uint key = base + tid;
+        float Sf[Br];
+        for (uint r = 0; r < Br; r++) Sf[r] = 0;
+        if (key < keys) {
+            // dot tile: one key reused across query rows.
+            for (uint d = 0; d < vectors; d++) {
+                uint offset = key * dimension * kv_heads + kv_head * dimension + d * VK_ATTENTION_VECTOR;
+                vec4 K_Tf = vec4(0);
+                for (uint i = 0; i < VK_ATTENTION_VECTOR; i++) {
+                    if (d * VK_ATTENTION_VECTOR + i < dimension) K_Tf[i] = data_k[offset + i];
+                }
+                for (uint r = 0; r < Br; r++) Sf[r] = dot_product(Qf[r * qf_stride + d],K_Tf,Sf[r]);
+            }
+        }
+        for (uint r = 0; r < Br; r++) {
+            bool valid = key < keys && (p[6] == 0 || key <= first_query + r);
+            Sf[r] = valid? Sf[r] * inversesqrt(float(dimension)) : -uintBitsToFloat(VK_FLOAT_INFINITY);
+            float rowmaxf = reduce(Sf[r],true);
+            float Moldf = Mf[r];
+            Mf[r] = max(rowmaxf,Moldf);
+            float eMf = Lf[r] == 0? 0 : exp(Moldf - Mf[r]);
+            float Pf = valid? exp(Sf[r] - Mf[r]) : 0;
+            probabilities[r * Bc + tid] = Pf;
+            Lf[r] = eMf * Lf[r] + reduce(Pf,false);
+            for (uint d = 0; d < output_chunks; d++) Of[r][d] = eMf * Of[r][d];
+        }
+        barrier();
+        // value tile and Of accumulation, transposed across feature lanes.
+        for (uint c = 0; c < Bc && base + c < keys; c++) {
+            for (uint d = 0; d < output_chunks; d++) {
+                uint feature = (d * VK_COMPUTE_LANES + tid) * VK_ATTENTION_VECTOR;
+                if (feature >= dimension) continue;
+                uint offset = (base + c) * dimension * kv_heads + kv_head * dimension + feature;
+                vec4 Vf = vec4(0);
+                for (uint i = 0; i < VK_ATTENTION_VECTOR; i++) {
+                    if (feature + i < dimension) Vf[i] = data_v[offset + i];
+                }
+                for (uint r = 0; r < Br; r++) Of[r][d] += probabilities[r * Bc + c] * Vf;
+            }
+        }
+        barrier();
+    }
+    for (uint r = 0; r < Br; r++) {
+        if (first_query + r >= rows) continue;
+        for (uint d = 0; d < output_chunks; d++) {
+            uint feature = (d * VK_COMPUTE_LANES + tid) * VK_ATTENTION_VECTOR;
+            if (feature >= dimension) continue;
+            uint offset = (first_query + r) * channels + head * dimension + feature;
+            vec4 value = Of[r][d] / Lf[r];
+            for (uint i = 0; i < VK_ATTENTION_VECTOR; i++) {
+                if (feature + i < dimension) data_o[offset + i] = value[i];
+            }
+        }
+    }
+}

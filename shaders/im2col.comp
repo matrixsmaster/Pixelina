@@ -1,0 +1,40 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+// NHWC input, bounded pixel tiles, F32 output
+#include "../src/vulkan_ops.h"
+
+layout(local_size_x=VK_COMPUTE_LANES) in;
+layout(set=0,binding=0,std430) readonly buffer A { float a[]; };
+layout(set=0,binding=4,std430) writeonly buffer D { float d[]; };
+layout(push_constant) uniform Push { uint p[VK_PUSH_WORDS]; };
+
+void main()
+{
+    uint pixel = gl_WorkGroupID.x + p[VK_PUSH_GROUP_BASE];
+    if (pixel >= p[1]) return;
+    uint width = p[3],height = p[4],channels = p[5],kernel = p[6];
+    uint KHKW = kernel * kernel,CHW = channels * KHKW;
+    uint offset = pixel + p[7];
+    int base_iw = int(offset % width) - int(kernel / 2),base_ih = int(offset / width) - int(kernel / 2);
+    uint delta_ic = VK_COMPUTE_LANES / KHKW,delta_rem = VK_COMPUTE_LANES % KHKW;
+    uint delta_ky = delta_rem / kernel,delta_kx = delta_rem % kernel;
+    uint chw_idx = gl_LocalInvocationID.x;
+    uint ic = chw_idx / KHKW,rem = chw_idx % KHKW;
+    uint ky = rem / kernel,kx = rem % kernel;
+    for (; chw_idx < CHW; chw_idx += VK_COMPUTE_LANES) {
+        int iiw = base_iw + int(kx),iih = base_ih + int(ky);
+        float value = 0;
+        if (uint(iih) < height && uint(iiw) < width) value = a[(uint(iih) * width + uint(iiw)) * channels + ic];
+        d[pixel * CHW + chw_idx] = value;
+        ic += delta_ic;
+        kx += delta_kx;
+        ky += delta_ky;
+        uint kx_wrap = uint(kx >= kernel);
+        kx -= kx_wrap * kernel;
+        ky += kx_wrap;
+        uint ky_wrap = uint(ky >= kernel);
+        ky -= ky_wrap * kernel;
+        ic += ky_wrap;
+    }
+}

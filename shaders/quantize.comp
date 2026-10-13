@@ -1,0 +1,41 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+// eight vec4 lanes per Q8_1 block
+// Pixelina uses ordinary uint storage and packHalf2x16 instead of typed SSBOs
+#include "../src/vulkan_ops.h"
+
+layout(local_size_x=VK_COMPUTE_LANES) in;
+layout(set=0,binding=0,std430) readonly buffer A { vec4 data_a[]; };
+layout(set=0,binding=4,std430) writeonly buffer D { uint data_b[]; };
+layout(push_constant) uniform Push { uint p[VK_PUSH_WORDS]; };
+shared float shmem[VK_COMPUTE_LANES];
+void main()
+{
+    uint tid = gl_LocalInvocationID.x;
+    uint group = gl_WorkGroupID.x + p[VK_PUSH_GROUP_BASE];
+    uint ib = group * (VK_COMPUTE_LANES / VK_MMQ_PACKED_WORDS) + tid / VK_MMQ_PACKED_WORDS;
+    uint lane = tid % VK_MMQ_PACKED_WORDS;
+    // Keep every lane in the barriers, including a partial final workgroup.
+    vec4 vals = ib < p[1]? data_a[ib * VK_MMQ_PACKED_WORDS + lane] : vec4(0);
+    vec4 absolute = abs(vals);
+    shmem[tid] = max(max(absolute.x,absolute.y),max(absolute.z,absolute.w));
+    barrier();
+    for (uint s = VK_MMQ_PACKED_WORDS / 2; s > 0; s >>= 1) {
+        if (lane < s) shmem[tid] = max(shmem[tid],shmem[tid + s]);
+        barrier();
+    }
+    float d = shmem[tid - lane] / VK_MMQ_SCALE_LIMIT;
+    float inverse = d != 0? 1.0 / d : 0;
+    ivec4 quantized = ivec4(round(vals * inverse));
+    uint packed = (uint(quantized.x) & 255) | ((uint(quantized.y) & 255) << 8) | ((uint(quantized.z) & 255) << 16) | ((uint(quantized.w) & 255) << 24);
+    if (ib < p[1]) data_b[ib * VK_MMQ_BLOCK_WORDS + 1 + lane] = packed;
+    barrier();
+    shmem[tid] = float(quantized.x + quantized.y + quantized.z + quantized.w);
+    barrier();
+    for (uint s = VK_MMQ_PACKED_WORDS / 2; s > 0; s >>= 1) {
+        if (lane < s) shmem[tid] += shmem[tid + s];
+        barrier();
+    }
+    if (ib < p[1] && lane == 0) data_b[ib * VK_MMQ_BLOCK_WORDS] = packHalf2x16(vec2(d,shmem[tid] * d));
+}

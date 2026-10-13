@@ -1,0 +1,13 @@
+*.o
+*.d
+*.gguf
+*.safetensors
+/pixelina
+/assets/*.h
+/tools/embed
+/tools/icon
+/assets/pixelina.png
+/shaders/*.spv
+/shaders/*_shader.h
+apply_license.sh
+license_block

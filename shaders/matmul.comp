@@ -1,0 +1,107 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_control_flow_attributes : enable
+
+// scalar register-tiled path
+// Quantized loads use Pixelina's packed-byte interface
+#include "../src/vulkan_ops.h"
+
+layout(local_size_x_id=0,local_size_y=1,local_size_z=1) in;
+layout(constant_id=0) const uint BLOCK_SIZE = VK_MATRIX_LANES;
+layout(constant_id=1) const uint BM = VK_MATRIX_TILE;
+layout(constant_id=2) const uint BN = VK_MATRIX_TILE;
+layout(constant_id=4) const uint WM = VK_MATRIX_WARP_ROWS;
+layout(constant_id=5) const uint WN = VK_MATRIX_WARP_COLUMNS;
+layout(constant_id=6) const uint WMITER = VK_MATRIX_ROW_ITERATIONS;
+layout(constant_id=7) const uint TM = VK_MATRIX_REGISTER_ROWS;
+layout(constant_id=8) const uint TN = VK_MATRIX_REGISTER_COLUMNS;
+
+#define BK VK_MATRIX_INNER_TILE
+#define WARP VK_MATRIX_VIRTUAL_WARP
+#define SHMEM_STRIDE (BK / 2 + 1)
+
+layout(set=0,binding=0,std430) readonly buffer A { float a[]; };
+layout(set=0,binding=1,std430) readonly buffer B { float b[]; };
+layout(set=0,binding=3,std430) readonly buffer W { uint weights[]; };
+layout(set=0,binding=4,std430) writeonly buffer D { float d[]; };
+layout(push_constant) uniform Push { uint p[VK_PUSH_WORDS]; };
+
+#include "decode.glsl"
+
+shared vec2 buf_a[BM * SHMEM_STRIDE];
+shared vec2 buf_b[BN * SHMEM_STRIDE];
+
+float dot_product(vec4 x, vec4 y, float acc)
+{
+    return fma(x.x,y.x,fma(x.y,y.y,fma(x.z,y.z,fma(x.w,y.w,acc))));
+}
+
+void main()
+{
+    uint M = p[1],N = p[2],K = p[3];
+    uint group = gl_WorkGroupID.x + p[VK_PUSH_GROUP_BASE];
+    uint ir = group % p[VK_PUSH_GROUP_STRIDE],ic = group / p[VK_PUSH_GROUP_STRIDE];
+    const uint WNITER = (WM * WN) / (WARP * TM * TN * WMITER);
+    const uint WSUBM = WM / WMITER,WSUBN = WN / WNITER;
+    uint warp_i = gl_LocalInvocationID.x / WARP,tiw = gl_LocalInvocationID.x % WARP;
+    uint tiwr = tiw % (WSUBM / TM),tiwc = tiw / (WSUBM / TM);
+    uint warp_r = warp_i % (BM / WM),warp_c = warp_i / (BM / WM);
+    vec2 sums[WMITER * TM * WNITER * TN / 2];
+    vec4 cache_a[WMITER * TM],cache_b;
+    for (uint i = 0; i < WMITER * TM * WNITER * TN / 2; i++) sums[i] = vec2(0);
+    for (uint block = 0; block < K; block += BK) {
+        uint loadr = gl_LocalInvocationID.x % (BK / 2),loadc = gl_LocalInvocationID.x / (BK / 2);
+        for (uint l = loadc; l < BM; l += BLOCK_SIZE * 2 / BK) {
+            uint row = ir * BM + l,feature = block + loadr * 2;
+            buf_a[l * SHMEM_STRIDE + loadr] = vec2(row < M && feature < K? weight_value(p[4],row * p[5],feature) : 0,row < M && feature + 1 < K? weight_value(p[4],row * p[5],feature + 1) : 0);
+        }
+        for (uint l = loadc; l < BN; l += BLOCK_SIZE * 2 / BK) {
+            uint token = ic * BN + l,feature = block + loadr * 2;
+            buf_b[l * SHMEM_STRIDE + loadr] = vec2(token < N && feature < K? a[token * K + feature] : 0,token < N && feature + 1 < K? a[token * K + feature + 1] : 0);
+        }
+        barrier();
+        for (uint i = 0; i < BK / 4; i++) {
+            // Load from shared into cache
+            for (uint wsir = 0; wsir < WMITER; wsir++) {
+                for (uint j = 0; j < TM; j++) {
+                    cache_a[wsir * TM + j].xy = buf_a[(warp_r * WM + wsir * WSUBM + tiwr * TM + j) * SHMEM_STRIDE + 2 * i    ];
+                    cache_a[wsir * TM + j].zw = buf_a[(warp_r * WM + wsir * WSUBM + tiwr * TM + j) * SHMEM_STRIDE + 2 * i + 1];
+
+                }
+            }
+
+            for (uint wsic = 0; wsic < WNITER; wsic++) {
+                for (uint cc = 0; cc < TN; cc++) {
+                    cache_b.xy = buf_b[(warp_c * WN + wsic * WSUBN + tiwc * TN + cc) * SHMEM_STRIDE + 2 * i    ];
+                    cache_b.zw = buf_b[(warp_c * WN + wsic * WSUBN + tiwc * TN + cc) * SHMEM_STRIDE + 2 * i + 1];
+
+
+                    for (uint wsir = 0; wsir < WMITER; wsir++) {
+                        for (uint cr = 0; cr < TM / 2; cr++) {
+                            // [WNITER][TN][WMITER][TM / 2] -> [wsic][cc][wsir][cr]
+                            const uint sums_idx = (wsic * TN + cc) * WMITER * (TM / 2) + wsir * (TM / 2) + cr;
+                            sums[sums_idx].x = dot_product(cache_a[wsir * TM + 2 * cr    ], cache_b, sums[sums_idx].x);
+                            sums[sums_idx].y = dot_product(cache_a[wsir * TM + 2 * cr + 1], cache_b, sums[sums_idx].y);
+                        }
+                    }
+                }
+            }
+
+        }
+        barrier();
+    }
+    uint dr = ir * BM + warp_r * WM,dc = ic * BN + warp_c * WN;
+    for (uint wsic = 0; wsic < WNITER; wsic++) {
+        for (uint wsir = 0; wsir < WMITER; wsir++) {
+            uint dr_warp = dr + wsir * WSUBM + tiwr * TM,dc_warp = dc + wsic * WSUBN + tiwc * TN;
+            for (uint cc = 0; cc < TN; cc++) {
+                for (uint cr = 0; cr < TM / 2; cr++) {
+                    uint sums_idx = (wsic * TN + cc) * WMITER * (TM / 2) + wsir * (TM / 2) + cr;
+                    uint row = dr_warp + 2 * cr,token = dc_warp + cc;
+                    if (row < M && token < N) d[p[7] + token * p[6] + row] = sums[sums_idx].x + (p[8] != 0? b[row] : 0);
+                    if (row + 1 < M && token < N) d[p[7] + token * p[6] + row + 1] = sums[sums_idx].y + (p[8] != 0? b[row + 1] : 0);
+                }
+            }
+        }
+    }
+}

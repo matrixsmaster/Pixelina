@@ -1,0 +1,121 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_control_flow_attributes : enable
+#extension GL_KHR_shader_subgroup_shuffle : require
+
+// non-MMQ, row-split subgroup path
+// distributed Q/K dots, register softmax and deferred M/L/O reduction
+// Pixelina supplies F32 NHWC buffers, causal masking and flattened workgroups
+#include "../src/vulkan_ops.h"
+
+layout(local_size_x_id=0) in;
+layout(constant_id=0) const uint WorkGroupSize = VK_MATRIX_LANES;
+layout(constant_id=1) const uint Br = VK_FAST_ATTENTION_ROWS;
+layout(constant_id=3) const uint HSK = VK_FAST_ATTENTION_DEFAULT_DIM;
+layout(constant_id=6) const uint D_split = VK_FAST_ATTENTION_D_SPLIT;
+layout(constant_id=8) const uint SubGroupSize = VK_MATRIX_VIRTUAL_WARP;
+
+#define row_split VK_FAST_ATTENTION_ROW_SPLIT
+#define Bc VK_FAST_ATTENTION_KEY_TILE
+#define rows_per_thread (Br / row_split)
+#define cols_per_iter (WorkGroupSize / D_split / row_split)
+#define cols_per_thread (Bc / cols_per_iter)
+#define vectors_per_thread (HSK / D_split / VK_ATTENTION_VECTOR)
+#define qf_stride (HSK / VK_ATTENTION_VECTOR + 1)
+
+layout(set=0,binding=0,std430) readonly buffer Q { vec4 data_q[]; };
+layout(set=0,binding=1,std430) readonly buffer K { vec4 data_k[]; };
+layout(set=0,binding=2,std430) readonly buffer V { vec4 data_v[]; };
+layout(set=0,binding=4,std430) writeonly buffer O { vec4 data_o[]; };
+layout(push_constant) uniform Push { uint p[VK_PUSH_WORDS]; };
+shared vec4 Qf[Br * qf_stride];
+
+float dot_product(vec4 a, vec4 b, float acc)
+{
+    return fma(a.x,b.x,fma(a.y,b.y,fma(a.z,b.z,fma(a.w,b.w,acc))));
+}
+
+void main()
+{
+    uint tid = gl_LocalInvocationID.x;
+    uint group = gl_WorkGroupID.x + p[VK_PUSH_GROUP_BASE];
+    uint first_query = (group / p[3]) * Br,head = group % p[3];
+    uint kv_head = head / (p[3] / p[4]);
+    uint row_tid = tid / SubGroupSize,d_tid = tid % D_split,col_tid = (tid % SubGroupSize) / D_split;
+    uint q_stride = p[2] / VK_ATTENTION_VECTOR;
+    uint kv_stride = p[4] * HSK / VK_ATTENTION_VECTOR;
+    float negative = uintBitsToFloat(VK_FAST_ATTENTION_NEGATIVE_MAX);
+    for (uint idx = tid; idx < Br * HSK / VK_ATTENTION_VECTOR; idx += WorkGroupSize) {
+        uint r = idx / (HSK / VK_ATTENTION_VECTOR),d = idx % (HSK / VK_ATTENTION_VECTOR);
+        Qf[r * qf_stride + d] = first_query + r < p[1]? data_q[(first_query + r) * q_stride + head * HSK / VK_ATTENTION_VECTOR + d] * inversesqrt(float(HSK)) : vec4(0);
+    }
+    barrier();
+    float Mf[rows_per_thread],Lf[rows_per_thread];
+    vec4 Of[rows_per_thread][vectors_per_thread];
+    [[unroll]] for (uint r = 0; r < rows_per_thread; r++) {
+        Mf[r] = negative;
+        Lf[r] = 0;
+        [[unroll]] for (uint d = 0; d < vectors_per_thread; d++) Of[r][d] = vec4(0);
+    }
+    uint keys = p[6] != 0? min(p[5],first_query + Br) : p[5];
+    for (uint base = 0; base < keys; base += Bc) {
+        float Sf[rows_per_thread][cols_per_thread];
+        [[unroll]] for (uint r = 0; r < rows_per_thread; r++) {
+            [[unroll]] for (uint c = 0; c < cols_per_thread; c++) Sf[r][c] = 0;
+        }
+        [[unroll]] for (uint c = 0; c < cols_per_thread; c++) {
+            uint key = base + c * cols_per_iter + col_tid;
+            if (key >= keys) continue;
+            [[unroll]] for (uint d = 0; d < vectors_per_thread; d++) {
+                vec4 K_Tf = data_k[key * kv_stride + kv_head * HSK / VK_ATTENTION_VECTOR + d * D_split + d_tid];
+                [[unroll]] for (uint r = 0; r < rows_per_thread; r++) Sf[r][c] = dot_product(Qf[(row_tid * rows_per_thread + r) * qf_stride + d * D_split + d_tid],K_Tf,Sf[r][c]);
+            }
+        }
+        [[unroll]] for (uint c = 0; c < cols_per_thread; c++) {
+            [[unroll]] for (uint s = D_split / 2; s > 0; s >>= 1) {
+                [[unroll]] for (uint r = 0; r < rows_per_thread; r++) Sf[r][c] += subgroupShuffleXor(Sf[r][c],s);
+            }
+        }
+        [[unroll]] for (uint r = 0; r < rows_per_thread; r++) {
+            float rowmax = negative;
+            uint query = first_query + row_tid * rows_per_thread + r;
+            [[unroll]] for (uint c = 0; c < cols_per_thread; c++) {
+                uint key = base + c * cols_per_iter + col_tid;
+                if (key >= keys || (p[6] != 0 && key > query)) Sf[r][c] = negative;
+                rowmax = max(rowmax,Sf[r][c]);
+            }
+            float old = Mf[r];
+            Mf[r] = max(rowmax,old);
+            float rescale = exp(old - Mf[r]);
+            Lf[r] *= rescale;
+            [[unroll]] for (uint d = 0; d < vectors_per_thread; d++) Of[r][d] *= rescale;
+        }
+        [[unroll]] for (uint c = 0; c < cols_per_thread; c++) {
+            uint key = base + c * cols_per_iter + col_tid;
+            if (key >= keys) continue;
+            float Pf[rows_per_thread];
+            [[unroll]] for (uint r = 0; r < rows_per_thread; r++) {
+                uint query = first_query + row_tid * rows_per_thread + r;
+                Pf[r] = p[6] != 0 && key > query? 0 : exp(Sf[r][c] - Mf[r]);
+                Lf[r] += Pf[r];
+            }
+            [[unroll]] for (uint d = 0; d < vectors_per_thread; d++) {
+                vec4 Vf = data_v[key * kv_stride + kv_head * HSK / VK_ATTENTION_VECTOR + d * D_split + d_tid];
+                [[unroll]] for (uint r = 0; r < rows_per_thread; r++) Of[r][d] += Pf[r] * Vf;
+            }
+        }
+    }
+    [[unroll]] for (uint r = 0; r < rows_per_thread; r++) {
+        float rowmax = Mf[r];
+        [[unroll]] for (uint s = D_split; s < SubGroupSize; s *= 2) rowmax = max(rowmax,subgroupShuffleXor(rowmax,s));
+        float rescale = exp(Mf[r] - rowmax);
+        Lf[r] *= rescale;
+        [[unroll]] for (uint s = D_split; s < SubGroupSize; s *= 2) Lf[r] += subgroupShuffleXor(Lf[r],s);
+        [[unroll]] for (uint d = 0; d < vectors_per_thread; d++) {
+            vec4 value = Of[r][d] * rescale;
+            [[unroll]] for (uint s = D_split; s < SubGroupSize; s *= 2) value += subgroupShuffleXor(value,s);
+            uint query = first_query + row_tid * rows_per_thread + r;
+            if (query < p[1] && col_tid == 0) data_o[query * q_stride + head * HSK / VK_ATTENTION_VECTOR + d * D_split + d_tid] = Lf[r] != 0? value / Lf[r] : vec4(0);
+        }
+    }
+}

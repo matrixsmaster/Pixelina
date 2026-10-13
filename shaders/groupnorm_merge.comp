@@ -1,0 +1,43 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "../src/vulkan_ops.h"
+
+layout(local_size_x=VK_COMPUTE_LANES) in;
+layout(set=0,binding=0,std430) readonly buffer Input { float partials[]; };
+layout(set=0,binding=4,std430) buffer Output { float statistics[]; };
+layout(push_constant) uniform Push { uint p[VK_PUSH_WORDS]; };
+shared float means[VK_COMPUTE_LANES];
+shared float moments[VK_COMPUTE_LANES];
+shared float counts[VK_COMPUTE_LANES];
+
+void main()
+{
+    uint lane = gl_LocalInvocationIndex,group = gl_WorkGroupID.x + p[VK_PUSH_GROUP_BASE];
+    float mean = 0,moment = 0,count = 0;
+    for (uint chunk = lane; chunk < p[6]; chunk += VK_COMPUTE_LANES) {
+        uint offset = (group * p[6] + chunk) * VK_GROUP_STATS_WORDS;
+        float other = partials[offset + 2],total = count + other;
+        float delta = partials[offset] - mean;
+        moment += partials[offset + 1] + delta * delta * (count * other / total);
+        mean += delta * (other / total);
+        count = total;
+    }
+    means[lane] = mean;
+    moments[lane] = moment;
+    counts[lane] = count;
+    barrier();
+    for (uint stride = VK_COMPUTE_LANES / 2; stride > 0; stride /= 2) {
+        if (lane < stride && counts[lane + stride] != 0) {
+            float total = counts[lane] + counts[lane + stride];
+            float delta = means[lane + stride] - means[lane];
+            moments[lane] += moments[lane + stride] + delta * delta * (counts[lane] * counts[lane + stride] / total);
+            means[lane] += delta * (counts[lane + stride] / total);
+            counts[lane] = total;
+        }
+        barrier();
+    }
+    if (lane == 0) {
+        statistics[group * VK_GROUP_FINAL_STATS_WORDS] = means[0];
+        statistics[group * VK_GROUP_FINAL_STATS_WORDS + 1] = inversesqrt(max(moments[0] / counts[0],0) + uintBitsToFloat(p[4]));
+    }
+}

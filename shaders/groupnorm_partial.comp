@@ -1,0 +1,48 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "../src/vulkan_ops.h"
+
+layout(local_size_x=VK_COMPUTE_LANES) in;
+layout(set=0,binding=0,std430) readonly buffer Input { float input_data[]; };
+layout(set=0,binding=4,std430) buffer Output { float partials[]; };
+layout(push_constant) uniform Push { uint p[VK_PUSH_WORDS]; };
+shared float means[VK_COMPUTE_LANES];
+shared float moments[VK_COMPUTE_LANES];
+shared uint counts[VK_COMPUTE_LANES];
+
+void main()
+{
+    uint lane = gl_LocalInvocationIndex,workgroup = gl_WorkGroupID.x + p[VK_PUSH_GROUP_BASE];
+    uint chunk = workgroup % p[6],group = workgroup / p[6];
+    uint features = p[2] / p[3],length = p[1] * features;
+    uint begin = chunk * VK_GROUP_CHUNK,end = min(begin + VK_GROUP_CHUNK,length),count = 0;
+    float mean = 0,moment = 0,anchor = input_data[group * features];
+    for (uint index = begin + lane; index < end; index += VK_COMPUTE_LANES) {
+        uint offset = (index / features) * p[2] + group * features + index % features;
+        float value = input_data[offset] - anchor;
+        count++;
+        float delta = value - mean;
+        mean += delta / count;
+        moment += delta * (value - mean);
+    }
+    means[lane] = mean;
+    moments[lane] = moment;
+    counts[lane] = count;
+    barrier();
+    for (uint stride = VK_COMPUTE_LANES / 2; stride > 0; stride /= 2) {
+        if (lane < stride && counts[lane + stride] != 0) {
+            uint total = counts[lane] + counts[lane + stride];
+            float delta = means[lane + stride] - means[lane];
+            moments[lane] += moments[lane + stride] + delta * delta * (float(counts[lane]) * counts[lane + stride] / total);
+            means[lane] += delta * (float(counts[lane + stride]) / total);
+            counts[lane] = total;
+        }
+        barrier();
+    }
+    if (lane == 0) {
+        uint offset = (group * p[6] + chunk) * VK_GROUP_STATS_WORDS;
+        partials[offset] = means[0];
+        partials[offset + 1] = moments[0];
+        partials[offset + 2] = counts[0];
+    }
+}
