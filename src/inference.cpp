@@ -537,9 +537,10 @@ std::vector<float> inference_sigmas(int steps, float shift)
     return sigmas;
 }
 
-PixTensor inference_noise(size_t rows, uint64_t seed)
+PixTensor inference_noise(size_t rows, uint64_t seed, size_t channels)
 {
-    PixTensor noise(rows,Z_LATENT_CHANNELS);
+    PixTensor noise(rows,channels);
+    if (noise.values.empty()) return {};
     auto uniform = [&]() {
         seed += NOISE_SPLITMIX_INCREMENT;
         uint64_t bits = seed;
@@ -549,12 +550,12 @@ PixTensor inference_noise(size_t rows, uint64_t seed)
         return (double(bits >> 11) + 0.5) * NOISE_UNIFORM_SCALE;
     };
     // Fill channels-first to make the RNG-to-latent layout explicit across backends.
-    for (size_t c = 0; c < Z_LATENT_CHANNELS; c++) {
+    for (size_t c = 0; c < channels; c++) {
         for (size_t row = 0; row < rows; row += 2) {
             double radius = std::sqrt(-2 * std::log(uniform()));
             double angle = NOISE_TWO_PI * uniform();
-            noise.values[row * Z_LATENT_CHANNELS + c] = float(radius * std::cos(angle));
-            if (row + 1 < rows) noise.values[(row + 1) * Z_LATENT_CHANNELS + c] = float(radius * std::sin(angle));
+            noise.values[row * channels + c] = float(radius * std::cos(angle));
+            if (row + 1 < rows) noise.values[(row + 1) * channels + c] = float(radius * std::sin(angle));
         }
     }
     return noise;

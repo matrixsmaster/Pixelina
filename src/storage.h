@@ -14,6 +14,17 @@
 #define PADDED_TOKEN_ZERO_POS
 #define STBI_MAX_DIMENSIONS 16384
 #define IMAGE_TEMP_SUFFIX ".pixelina-export-XXXXXX"
+#define IMAGE_RESAMPLE_BITS 22
+#define IMAGE_RESAMPLE_ONE (1 << IMAGE_RESAMPLE_BITS)
+#define IMAGE_LANCZOS_RADIUS 3.0
+#define IMAGE_BICUBIC_RADIUS 2.0
+#define IMAGE_BICUBIC_COEFFICIENT -0.5
+#define IMAGE_BICUBIC_INNER_QUADRATIC 2.0
+#define IMAGE_BICUBIC_INNER_LINEAR 3.0
+#define IMAGE_BICUBIC_OUTER_QUADRATIC 5.0
+#define IMAGE_BICUBIC_OUTER_LINEAR 8.0
+#define IMAGE_BICUBIC_OUTER_CONSTANT 4.0
+#define IMAGE_PI 3.1415926535897932384626433832795
 #define PIXELINA_NAME "Pixelina"
 #define PIXELINA_CPU "CPU"
 #define PIXELINA_VULKAN "Vulkan"
@@ -27,6 +38,12 @@
 #define PIXELINA_DEFAULT_VAE "ae.safetensors"
 #define PIXELINA_DB "pixelina.txt"
 #define PIXELINA_VERSION "$v1;"
+#define PIXELINA_EDIT_VERSION "$v2;"
+#define PIXELINA_EDIT_RECORD_FIELDS 13
+#define QWEN_IMAGE_DEFAULT_STEPS 40
+#define QWEN_IMAGE_MAX_STEPS (1 << 24)
+#define QWEN_IMAGE_DEFAULT_REFERENCE_RESOLUTION 1024
+#define QWEN_IMAGE_MULTIPLE 32
 #define PIXELINA_JPG_QUALITY 95
 #define PIXELINA_IMAGE_MULTIPLE 16
 #define PIXELINA_DEFAULT_SEED 1337
@@ -53,14 +70,36 @@ struct PixSettings {
     std::string format = PIXELINA_JPG; // output format for Save
 };
 
+enum PixModelKind {
+    PIX_MODEL_Z_IMAGE,PIX_MODEL_QWEN_IMAGE
+};
+
+struct PixEditSettings {
+    uint64_t seed = PIXELINA_DEFAULT_SEED; // noise seed
+    int width = PIXELINA_DEFAULT_SIZE; // output pixel width
+    int height = PIXELINA_DEFAULT_SIZE; // output pixel height
+    int steps = QWEN_IMAGE_DEFAULT_STEPS; // Euler evaluations
+    int reference_resolution = QWEN_IMAGE_DEFAULT_REFERENCE_RESOLUTION; // reference area-side parameter
+    std::string diffuser; // selected diffuser GGUF
+    std::string encoder; // selected language GGUF
+    std::string vision; // matching vision/projector GGUF
+    std::string vae; // dedicated RGBA VAE safetensors
+    std::string backend = PIXELINA_CPU; // backend captured in the record
+    std::string format = PIXELINA_JPG; // output format captured in the record
+};
+
 struct PixImage {
     int width = 0; // decoded width
     int height = 0; // decoded height
     std::vector<unsigned char> rgb; // interleaved RGB pixels
+    std::vector<unsigned char> alpha; // optional row-major alpha, empty for opaque RGB
 };
 
 struct PixRecord {
+    PixModelKind model = PIX_MODEL_Z_IMAGE; // versioned model family
     PixSettings settings; // UI parameters
+    PixEditSettings edit_settings; // Qwen Image parameters
+    std::vector<std::string> references; // persisted reference paths in input order
     std::string filename; // explicit saved-image association
     std::string prompt; // literal multiline prompt
 };
@@ -70,9 +109,19 @@ struct PixDirEntry {
     bool directory; // directory selector navigation flag
 };
 
+enum PixImageFilter {
+    PIX_IMAGE_BICUBIC,PIX_IMAGE_LANCZOS
+};
+
+enum PixImageAlpha {
+    PIX_IMAGE_PREMULTIPLIED,PIX_IMAGE_WHITE,PIX_IMAGE_RGB
+};
+
 bool parse_unsigned(const std::string &text, uint64_t &value);
 bool parse_float(const std::string &text, float &value);
 bool settings_valid(const PixSettings &settings, std::string &error);
+bool edit_settings_valid(const PixEditSettings &settings, std::string &error);
+bool image_valid(const PixImage &image);
 bool database_parse(const std::string &text, std::vector<PixRecord> &records, std::string &error);
 std::string database_record(const PixRecord &record);
 bool database_load(const std::string &directory, std::vector<PixRecord> &records, std::string &error);
@@ -81,6 +130,7 @@ bool image_decode(const unsigned char* bytes, size_t count, PixImage &image, std
 bool image_load(const std::string &path, PixImage &image, std::string &error);
 bool image_save(const std::string &path, const PixImage &image, std::string &error);
 PixImage image_thumbnail(const PixImage &image);
+PixImage image_resize(const PixImage &image, int width, int height, PixImageFilter filter, PixImageAlpha alpha);
 std::string path_join(const std::string &directory, const std::string &name);
 bool directory_list(const std::string &path, std::vector<PixDirEntry> &entries, std::string &error);
 

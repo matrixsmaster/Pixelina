@@ -16,6 +16,7 @@
 #define INFERENCE_ERROR_NUMERICAL 4
 #define INFERENCE_ERROR_VULKAN 5
 #define INFERENCE_ERROR_STOPPED 6
+#define INFERENCE_ERROR_MEMORY 7
 #define QWEN_HIDDEN 2560
 #define QWEN_INTERMEDIATE 9728
 #define QWEN_LAYERS 36
@@ -71,7 +72,7 @@ using InferenceProgress = std::function<bool(float,const std::string &)>;
 using InferencePreview = std::function<void(PixImage)>;
 PixRotary z_rotary(size_t tokens, size_t actual, size_t caption, size_t patch_width, bool image);
 std::vector<float> inference_sigmas(int steps, float shift);
-PixTensor inference_noise(size_t rows, uint64_t seed);
+PixTensor inference_noise(size_t rows, uint64_t seed, size_t channels = Z_LATENT_CHANNELS);
 bool inference_validate(const PixSettings &settings);
 PixTensor inference_encode(const PixModelFile &encoder, const std::string &prompt, const InferenceProgress &progress);
 PixTensor inference_diffuse(const PixModelFile &diffuser, const PixTensor &latents, const PixTensor &conditioning, size_t width, size_t height, float sigma, const InferenceProgress &progress, float begin, float span);

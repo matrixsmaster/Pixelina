@@ -6,6 +6,7 @@
  */
 #include <algorithm>
 #include <cerrno>
+#include <climits>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -55,6 +56,47 @@ bool settings_valid(const PixSettings &settings, std::string &error)
     return false;
 }
 
+bool edit_settings_valid(const PixEditSettings &settings, std::string &error)
+{
+    if (settings.width <= 0 || settings.height <= 0 || settings.width % QWEN_IMAGE_MULTIPLE || settings.height % QWEN_IMAGE_MULTIPLE) {
+        error = "Width and height must be positive multiples of 32.";
+        return false;
+    }
+    if (uint64_t(settings.width) * settings.height > PIXELINA_MAX_PIXELS || uint64_t(settings.width) * settings.height > SIZE_MAX / 4) {
+        error = "Image dimensions exceed the supported memory bound.";
+        return false;
+    }
+    if (settings.steps < 2 || settings.steps > QWEN_IMAGE_MAX_STEPS) {
+        error = "Edit steps must be between 2 and " + std::to_string(QWEN_IMAGE_MAX_STEPS) + " for the terminal-stretched schedule.";
+        return false;
+    }
+    if (settings.reference_resolution <= 0 || uint64_t(settings.reference_resolution) * settings.reference_resolution > PIXELINA_MAX_PIXELS) {
+        error = "Reference resolution exceeds the supported memory bound.";
+        return false;
+    }
+    if (settings.backend != PIXELINA_CPU && settings.backend != PIXELINA_VULKAN) {
+        error = "Unknown backend.";
+        return false;
+    }
+    if (settings.format != PIXELINA_JPG && settings.format != PIXELINA_PNG) {
+        error = "Unknown output format.";
+        return false;
+    }
+    if (settings.diffuser.empty() || settings.encoder.empty() || settings.vision.empty() || settings.vae.empty()) {
+        error = "Select all four Edit model files.";
+        return false;
+    }
+    return true;
+}
+
+bool image_valid(const PixImage &image)
+{
+    if (image.width <= 0 || image.height <= 0) return false;
+    uint64_t pixels = uint64_t(image.width) * image.height;
+    if (pixels > PIXELINA_MAX_PIXELS || pixels > SIZE_MAX / 4 || image.width > INT_MAX / 4) return false;
+    return image.rgb.size() == size_t(pixels) * 3 && (image.alpha.empty() || image.alpha.size() == size_t(pixels));
+}
+
 std::string path_join(const std::string &directory, const std::string &name)
 {
     if (!name.empty() && name[0] == '/') return name;
@@ -64,9 +106,23 @@ std::string path_join(const std::string &directory, const std::string &name)
 
 std::string database_record(const PixRecord &record)
 {
-    const PixSettings &s = record.settings;
     std::ostringstream out;
-    out << PIXELINA_VERSION << s.seed << ';' << s.width << ';' << s.height << ';' << s.steps << ';' << std::setprecision(std::numeric_limits<float>::max_digits10) << s.shift << ';' << s.diffuser << ';' << s.encoder << ';' << s.vae << ';' << s.backend << ';' << s.format << ';' << record.filename << ';' << record.prompt << '\n';
+    switch (record.model) {
+    case PIX_MODEL_Z_IMAGE: {
+        const PixSettings &s = record.settings;
+        out << PIXELINA_VERSION << s.seed << ';' << s.width << ';' << s.height << ';' << s.steps << ';' << std::setprecision(std::numeric_limits<float>::max_digits10) << s.shift << ';' << s.diffuser << ';' << s.encoder << ';' << s.vae << ';' << s.backend << ';' << s.format << ';' << record.filename << ';';
+        break;
+    }
+    case PIX_MODEL_QWEN_IMAGE: {
+        const PixEditSettings &s = record.edit_settings;
+        out << PIXELINA_EDIT_VERSION << s.seed << ';' << s.width << ';' << s.height << ';' << s.steps << ';' << s.reference_resolution << ';' << s.diffuser << ';' << s.encoder << ';' << s.vision << ';' << s.vae << ';' << s.backend << ';' << s.format << ';' << record.filename << ';' << record.references.size() << ';';
+        for (const std::string &path : record.references) out << path << ';';
+        break;
+    }
+    default:
+        return {};
+    }
+    out << record.prompt << '\n';
     return out.str();
 }
 
@@ -75,55 +131,108 @@ bool database_parse(const std::string &text, std::vector<PixRecord> &records, st
     std::vector<PixRecord> parsed;
     size_t start = 0;
     while (start < text.size()) {
-        if (text.compare(start, std::strlen(PIXELINA_VERSION), PIXELINA_VERSION)) {
+        PixRecord record;
+        size_t count = 0,cursor = start;
+        if (!text.compare(start,std::strlen(PIXELINA_VERSION),PIXELINA_VERSION)) {
+            count = PIXELINA_RECORD_FIELDS;
+            cursor += std::strlen(PIXELINA_VERSION);
+        } else if (!text.compare(start,std::strlen(PIXELINA_EDIT_VERSION),PIXELINA_EDIT_VERSION)) {
+            record.model = PIX_MODEL_QWEN_IMAGE;
+            count = PIXELINA_EDIT_RECORD_FIELDS;
+            cursor += std::strlen(PIXELINA_EDIT_VERSION);
+        } else {
             error = "Malformed database record or unsupported log version at byte " + std::to_string(start) + ".";
             return false;
         }
-        PixRecord record;
         std::vector<std::string> fields;
-        size_t cursor = start + std::strlen(PIXELINA_VERSION);
-        for (unsigned i = 0; i < PIXELINA_RECORD_FIELDS; i++) {
-            size_t end = text.find(';',cursor);
-            size_t newline = text.find('\n',cursor);
+        for (size_t i = 0; i < count; i++) {
+            size_t end = text.find(';',cursor),newline = text.find('\n',cursor);
             if (end == std::string::npos || (newline != std::string::npos && newline < end)) {
-                error = "Incomplete version 1 settings prefix.";
+                error = "Incomplete database settings prefix.";
                 return false;
             }
             fields.push_back(text.substr(cursor,end - cursor));
             cursor = end + 1;
         }
-        uint64_t number;
-        if (!parse_unsigned(fields[0],record.settings.seed)) {
+        uint64_t seed,number;
+        if (!parse_unsigned(fields[0],seed)) {
             error = "Invalid seed in database.";
             return false;
         }
-        int* dimensions[] = {&record.settings.width,&record.settings.height,&record.settings.steps};
-        for (unsigned i = 0; i < 3; i++) {
-            if (!parse_unsigned(fields[i + 1],number)) {
-                error = "Invalid dimensions or steps in database.";
+        int width,height,steps,resolution = 0;
+        int* dimensions[] = {&width,&height,&steps,&resolution};
+        size_t numeric_count = record.model == PIX_MODEL_QWEN_IMAGE? 4 : 3;
+        for (size_t i = 0; i < numeric_count; i++) {
+            if (!parse_unsigned(fields[i + 1],number) || number > INT_MAX) {
+                error = "Invalid dimensions, steps or reference resolution in database.";
                 return false;
             }
             *dimensions[i] = int(number);
         }
-        if (!parse_float(fields[4],record.settings.shift)) {
-            error = "Invalid scheduler shift in database.";
+        switch (record.model) {
+        case PIX_MODEL_Z_IMAGE: {
+            PixSettings &s = record.settings;
+            s.seed = seed;
+            s.width = width;
+            s.height = height;
+            s.steps = steps;
+            if (!parse_float(fields[4],s.shift)) {
+                error = "Invalid scheduler shift in database.";
+                return false;
+            }
+            s.diffuser = fields[5];
+            s.encoder = fields[6];
+            s.vae = fields[7];
+            s.backend = fields[8];
+            s.format = fields[9];
+            record.filename = fields[10];
+            if (!settings_valid(s,error)) return false;
+            break;
+        }
+        case PIX_MODEL_QWEN_IMAGE: {
+            PixEditSettings &s = record.edit_settings;
+            s.seed = seed;
+            s.width = width;
+            s.height = height;
+            s.steps = steps;
+            s.reference_resolution = resolution;
+            s.diffuser = fields[5];
+            s.encoder = fields[6];
+            s.vision = fields[7];
+            s.vae = fields[8];
+            s.backend = fields[9];
+            s.format = fields[10];
+            record.filename = fields[11];
+            uint64_t references;
+            if (!parse_unsigned(fields[12],references) || references > text.size() - cursor) {
+                error = "Invalid reference count in database.";
+                return false;
+            }
+            // Consume paths without allocating from the untrusted reference count.
+            for (uint64_t i = 0; i < references; i++) {
+                size_t end = text.find(';',cursor),newline = text.find('\n',cursor);
+                if (end == std::string::npos || (newline != std::string::npos && newline < end)) {
+                    error = "Incomplete database reference prefix.";
+                    return false;
+                }
+                record.references.push_back(text.substr(cursor,end - cursor));
+                cursor = end + 1;
+            }
+            if (!edit_settings_valid(s,error)) return false;
+            break;
+        }
+        }
+        if (record.filename.empty()) {
+            error = "Missing result filename in database.";
             return false;
         }
-        record.settings.diffuser = fields[5];
-        record.settings.encoder = fields[6];
-        record.settings.vae = fields[7];
-        record.settings.backend = fields[8];
-        record.settings.format = fields[9];
-        record.filename = fields[10];
-        if (record.filename.empty() || !settings_valid(record.settings,error)) return false;
-
-        // A leading dollar on a new line is a record boundary
+        // A leading dollar on a new line remains a record boundary for both versions.
         size_t next = text.find("\n$",cursor);
         size_t end = next == std::string::npos? text.size() : next + 1;
         size_t prompt_end = end;
         if (prompt_end > cursor && text[prompt_end - 1] == '\n') prompt_end--;
         record.prompt = text.substr(cursor,prompt_end - cursor);
-        parsed.push_back(record);
+        parsed.push_back(std::move(record));
         start = end;
     }
     records.swap(parsed);
@@ -171,7 +280,7 @@ bool storage_save(const std::string &directory, PixRecord &record, const PixImag
         struct stat info;
         if (!stat(path_join(directory,std::string(stem) + PIXELINA_EXT_JPG).c_str(),&info) || !stat(path_join(directory,std::string(stem) + PIXELINA_EXT_PNG).c_str(),&info)) used = true;
         if (used) continue;
-        filename = std::string(stem) + (record.settings.format == PIXELINA_PNG? PIXELINA_EXT_PNG : PIXELINA_EXT_JPG);
+        filename = std::string(stem) + ((record.model == PIX_MODEL_QWEN_IMAGE? record.edit_settings.format : record.settings.format) == PIXELINA_PNG? PIXELINA_EXT_PNG : PIXELINA_EXT_JPG);
         path = path_join(directory,filename);
         int fd = open(path.c_str(),O_WRONLY | O_CREAT | O_EXCL,0666);
         if (fd < 0) {

@@ -35,9 +35,9 @@ void main()
     uint workgroup = gl_WorkGroupID.x + p[VK_PUSH_GROUP_BASE];
     uint item = workgroup * VK_COMPUTE_LANES + lane;
     uint op = p[0],rows = p[1],channels = p[2];
-    if (op == VK_OP_NORM || op == VK_OP_GROUP) {
+    if (op == VK_OP_NORM || op == VK_OP_GROUP || op == VK_OP_L2NORM) {
         uint group = workgroup;
-        if ((op == VK_OP_NORM && group >= rows) || (op == VK_OP_GROUP && group >= p[3])) return;
+        if ((op != VK_OP_GROUP && group >= rows) || (op == VK_OP_GROUP && group >= p[3])) return;
         uint count = op == VK_OP_GROUP? rows * (channels / p[3]) : channels;
         float sum = 0;
         for (uint index = lane; index < count; index += VK_COMPUTE_LANES) {
@@ -45,14 +45,15 @@ void main()
             sum += a[offset];
         }
         float mean = reduce_sum(sum) / count;
-        if (op == VK_OP_NORM && p[3] == 0) mean = 0;
+        if (op == VK_OP_L2NORM || (op == VK_OP_NORM && p[3] == 0)) mean = 0;
         sum = 0;
         for (uint index = lane; index < count; index += VK_COMPUTE_LANES) {
             uint offset = op == VK_OP_GROUP? (index / (channels / p[3])) * channels + group * (channels / p[3]) + index % (channels / p[3]) : group * channels + index;
             float delta = a[offset] - mean;
             sum += delta * delta;
         }
-        float inverse = inversesqrt(reduce_sum(sum) / count + uintBitsToFloat(p[4]));
+        float square = reduce_sum(sum);
+        float inverse = op == VK_OP_L2NORM? sqrt(float(channels)) / max(sqrt(square),uintBitsToFloat(p[4])) : inversesqrt(square / count + uintBitsToFloat(p[4]));
         for (uint index = lane; index < count; index += VK_COMPUTE_LANES) {
             uint offset = op == VK_OP_GROUP? (index / (channels / p[3])) * channels + group * (channels / p[3]) + index % (channels / p[3]) : group * channels + index;
             uint feature = offset % channels;
@@ -64,6 +65,28 @@ void main()
     }
     if (item >= rows * channels) return;
     if (op == VK_OP_COPY) d[p[5] + item] = a[p[4] + (item / channels) * p[3] + item % channels];
+    else if (op == VK_OP_GATHER) d[item] = a[floatBitsToUint(b[item / channels]) * channels + item % channels];
+    else if (op == VK_OP_SCATTER) d[floatBitsToUint(b[item / channels]) * channels + item % channels] = a[item];
+    else if (op == VK_OP_SHORTCUT) {
+        uint side = p[5],temporal = p[6],factor = temporal * side * side;
+        uint width = p[7] != 0? p[4] * side : p[4] / side;
+        uint c = item % channels,pixel = item / channels,x = pixel % width,y = pixel / width;
+        float value = 0;
+        if (p[7] != 0) {
+            uint repeats = channels * factor / p[3];
+            uint source_channel = (c * factor + (temporal - 1) * side * side + (y % side) * side + x % side) / repeats;
+            value = a[((y / side) * p[4] + x / side) * p[3] + source_channel];
+        } else {
+            uint group = p[3] * factor / channels;
+            for (uint i = 0; i < group; i++) {
+                uint index = c * group + i,source_channel = index / factor;
+                uint time = index / (side * side) % temporal,dy = index / side % side,dx = index % side;
+                if (time == temporal - 1) value += a[((y * side + dy) * p[4] + x * side + dx) * p[3] + source_channel];
+            }
+            value /= group;
+        }
+        d[item] = value;
+    }
     else if (op == VK_OP_BIAS) d[item] = a[item] + b[item % channels];
     else if (op == VK_OP_PATCH) {
         uint token = item / channels,feature = item % channels;
@@ -79,10 +102,21 @@ void main()
         uint pixel = item / channels,x = pixel % (p[3] * 2),y = pixel / (p[3] * 2);
         d[item] = a[((y / 2) * p[3] + x / 2) * channels + item % channels];
     } else if (op == VK_OP_SILU) d[item] = a[item] / (1 + exp(-a[item]));
+    else if (op == VK_OP_GELU_TANH) d[item] = 0.5 * a[item] * (1 + tanh(VK_GELU_SCALE * (a[item] + VK_GELU_CUBIC * a[item] * a[item] * a[item])));
+    else if (op == VK_OP_GELU_EXACT) {
+        float x = abs(a[item] / VK_SQRT_TWO),t = 1 / (1 + VK_ERF_P * x);
+        float erf = 1 - (((((VK_ERF_A5 * t + VK_ERF_A4) * t) + VK_ERF_A3) * t + VK_ERF_A2) * t + VK_ERF_A1) * t * exp(-x * x);
+        d[item] = 0.5 * a[item] * (1 + sign(a[item]) * erf);
+    }
     else if (op == VK_OP_GATE) d[item] = a[item] * b[item];
     else if (op == VK_OP_ADD) d[item] = a[item] + b[item];
     else if (op == VK_OP_MODULATE) d[item] = a[item] * (1 + b[p[3] * channels + item % channels]);
     else if (op == VK_OP_RESIDUAL) d[item] = a[item] + b[item] * (p[4] != 0? tanh(c[p[3] * channels + item % channels]) : 1);
+    else if (op == VK_OP_QWEN_SCALE || op == VK_OP_QWEN_RESIDUAL) {
+        uint row = item / channels,index = (row >= p[4]? 0 : 1) * p[5] + p[3] * channels + item % channels;
+        d[item] = op == VK_OP_QWEN_SCALE? a[item] * (1 + b[index]) : a[item] + c[item] * tanh(b[index]);
+    }
+    else if (op == VK_OP_EULER) d[item] = a[item] + b[item] * uintBitsToFloat(p[3]);
     else if (op == VK_OP_AFFINE) d[item] = a[item] * uintBitsToFloat(p[3]) + uintBitsToFloat(p[4]);
     else if (op == VK_OP_DECODE) d[item] = weight_value(p[3],(item / channels) * p[4],item % channels);
     else if (op == VK_OP_ROPE) {

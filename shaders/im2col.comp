@@ -14,6 +14,16 @@ void main()
     uint pixel = gl_WorkGroupID.x + p[VK_PUSH_GROUP_BASE];
     if (pixel >= p[1]) return;
     uint width = p[3],height = p[4],channels = p[5],kernel = p[6];
+    if (p[8] != 0) {
+        uint kernel_y = p[9],inner = channels * kernel * kernel_y,offset = pixel + p[7];
+        int x = int(offset % p[8] * p[10]) - int(p[12]),y = int(offset / p[8] * p[11]) - int(p[13]);
+        for (uint i = gl_LocalInvocationID.x; i < inner; i += VK_COMPUTE_LANES) {
+            int ix = x + int(i % kernel),iy = y + int(i / kernel % kernel_y);
+            uint c = i / (kernel * kernel_y);
+            d[pixel * inner + i] = uint(ix) < width && uint(iy) < height? a[(uint(iy) * width + uint(ix)) * channels + c] : 0;
+        }
+        return;
+    }
     uint KHKW = kernel * kernel,CHW = channels * KHKW;
     uint offset = pixel + p[7];
     int base_iw = int(offset % width) - int(kernel / 2),base_ih = int(offset / width) - int(kernel / 2);

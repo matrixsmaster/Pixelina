@@ -32,6 +32,7 @@ struct block_q8_K {
     int8_t qs[QK_K]; // signed quantized activations
     int16_t bsums[QK_K / PIX_QUANT_SUM_GROUP]; // activation sums used for weight minima
 };
+static_assert(sizeof(block_q8_K) == MODEL_Q8_K_BYTES,"Q8_K activation layout mismatch");
 static_assert(sizeof(block_q8_0) == MODEL_Q8_BYTES,"Q8_0 layout mismatch");
 static_assert(sizeof(block_q5_K) == MODEL_Q5_BYTES,"Q5_K layout mismatch");
 static_assert(sizeof(block_q6_K) == MODEL_Q6_BYTES,"Q6_K layout mismatch");

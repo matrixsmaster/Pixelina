@@ -37,6 +37,9 @@
 #define HALF_EXPONENT_MASK 31
 #define HALF_MANTISSA_MASK 1023
 #define HALF_SIGN_MASK 0x8000
+#define COMPUTE_GELU_SCALE 0.7978845608028654f
+#define COMPUTE_GELU_CUBIC 0.044715f
+#define COMPUTE_SQRT_TWO 1.4142135623730951f
 #define K_SCALE_MASK 63
 #define Q5_HIGH_OFFSET 16
 #define Q5_LOW_OFFSET 48
@@ -52,6 +55,18 @@ struct PixTensor {
     PixTensor(size_t count, size_t features);
 };
 
+struct PixAttentionRange {
+    size_t query_begin; // first local query row, inclusive
+    size_t query_end; // final local query row, exclusive
+    size_t key_end; // permitted key prefix, exclusive
+    bool causal; // restrict keys to the absolute query row
+};
+
+struct PixConv2D {
+    size_t stride_x = 1,stride_y = 1; // spatial convolution strides
+    size_t left = 0,right = 0,top = 0,bottom = 0; // independent zero-padding extents
+};
+
 void cpu_parallel(size_t work, const std::function<void(size_t,size_t)> &function);
 void cpu_set_threads(size_t count);
 size_t cpu_thread_count();
@@ -59,14 +74,25 @@ bool cpu_gemm(const float* weights, const float* input, float* output, size_t ro
 bool cpu_quant_matmul(const unsigned char* weights, uint32_t type, const float* input, float* output, size_t rows, size_t columns, size_t inner);
 float cpu_dot(const float* a, const float* b, size_t count);
 PixTensor tensor_linear(const PixModelFile &model, const std::string &name, const PixTensor &input, bool bias);
+PixTensor tensor_linear_rows(const PixModelFile &model, const std::string &name, const PixTensor &input, size_t first, size_t count);
 PixTensor tensor_norm(const PixTensor &input, const std::vector<float> &weight, float epsilon, bool centered = false);
 std::vector<float> tensor_vector(const PixModelFile &model, const std::string &name);
 void tensor_silu(PixTensor &tensor);
+void tensor_gelu(PixTensor &tensor, bool approximate);
+void tensor_bias(PixTensor &tensor, const std::vector<float> &bias);
+PixTensor tensor_l2norm(const PixTensor &input, const std::vector<float> &weight, float epsilon);
+PixTensor tensor_slice(const PixTensor &input, size_t row, size_t rows, size_t feature, size_t channels);
+PixTensor tensor_gather(const PixTensor &input, const std::vector<size_t> &rows);
+bool tensor_scatter(PixTensor &destination, const PixTensor &source, const std::vector<size_t> &rows);
+PixTensor tensor_upsample(const PixTensor &input, size_t width, size_t height);
+PixTensor tensor_resample_shortcut(const PixTensor &input, size_t width, size_t height, size_t channels, size_t temporal, bool up, bool spatial);
 void tensor_add(PixTensor &destination, const PixTensor &source);
 void tensor_gate(PixTensor &destination, const PixTensor &gate);
 PixTensor tensor_attention(const PixTensor &q, const PixTensor &k, const PixTensor &v, size_t heads, size_t kv_heads, bool causal);
+PixTensor tensor_attention(const PixTensor &q, const PixTensor &k, const PixTensor &v, size_t heads, size_t kv_heads, const std::vector<PixAttentionRange> &ranges, size_t query_offset = 0);
 void tensor_rope(PixTensor &tensor, size_t heads, const std::vector<float> &cosine, const std::vector<float> &sine, bool interleaved);
 PixTensor tensor_conv(const PixModelFile &model, const std::string &name, const PixTensor &input, size_t width, size_t height);
+PixTensor tensor_conv(const PixModelFile &model, const std::string &name, const PixTensor &input, size_t width, size_t height, const PixConv2D &geometry, bool bias = true);
 PixTensor tensor_groupnorm(const PixModelFile &model, const std::string &name, const PixTensor &input);
 
 #endif

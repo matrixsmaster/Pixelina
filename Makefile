@@ -8,7 +8,7 @@ CXXFLAGS ?= -O3 -g
 CXXFLAGS += -std=c++17 -fno-exceptions -pthread -Wall -Wextra -Wno-missing-field-initializers
 LDLIBS += -pthread $(shell $(PKG_CONFIG) --libs sdl2)
 
-CORE := storage image json model tokenizer tensor backend_cpu kernels_cpu kernels_quant backend_vulkan convolution inference
+CORE := storage image json model tokenizer tensor backend_cpu kernels_cpu kernels_quant backend_vulkan convolution inference qwen_image qwen_vl qwen_vae
 OBJECTS := $(addprefix src/,$(addsuffix .o,$(CORE)))
 APP_OBJECTS := $(OBJECTS) src/ui.o src/pixuilib.o src/main.o
 HEADERS := $(wildcard src/*.h)

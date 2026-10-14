@@ -97,6 +97,7 @@ struct VulkanState {
     VkPipeline vector = VK_NULL_HANDLE; // matrix-vector projections
     VkPipeline im2col = VK_NULL_HANDLE; // convolution patch extraction
     VkPipeline attention = VK_NULL_HANDLE; // F32 tiled flash attention
+    VkPipeline attention_large = VK_NULL_HANDLE; // lazily specialized Qwen VAE head size
     VkPipeline quantize = VK_NULL_HANDLE; // Q8_1 activation conversion
     VkPipeline cooperative = VK_NULL_HANDLE; // FP16 cooperative matrix with F32 accumulation
     VkPipeline group_partial = VK_NULL_HANDLE; // shifted Welford chunk statistics
@@ -163,6 +164,7 @@ struct VulkanState {
         if (vector) vkDestroyPipeline(device,vector,nullptr);
         if (im2col) vkDestroyPipeline(device,im2col,nullptr);
         if (attention) vkDestroyPipeline(device,attention,nullptr);
+        if (attention_large) vkDestroyPipeline(device,attention_large,nullptr);
         if (quantize) vkDestroyPipeline(device,quantize,nullptr);
         if (cooperative) vkDestroyPipeline(device,cooperative,nullptr);
         if (group_partial) vkDestroyPipeline(device,group_partial,nullptr);
@@ -739,7 +741,7 @@ struct VulkanState {
 
     void* weight(const PixModelFile &file, const PixWeight &tensor)
     {
-        std::string key = file.filename + ":" + tensor.name;
+        std::string key = file.filename + ":" + tensor.name + ":" + std::to_string(tensor.offset) + ":" + std::to_string(tensor.bytes);
         auto existing = weights.find(key);
         if (existing != weights.end()) {
             existing->second.used = dispatches;
@@ -767,16 +769,32 @@ struct VulkanState {
 
     unsigned cost_kind(unsigned pipeline_kind, const VulkanPush &push)
     {
-        if (pipeline_kind == VULKAN_PIPELINE_MATRIX) return (push[2] == 1? VULKAN_COST_VECTOR : VULKAN_COST_MATRIX) + push[4];
-        if (pipeline_kind == VULKAN_PIPELINE_MMQ) return VULKAN_COST_MMQ + push[4];
-        if (pipeline_kind == VULKAN_PIPELINE_QUANTIZE) return VULKAN_COST_QUANTIZE;
-        if (pipeline_kind == VULKAN_PIPELINE_COOPERATIVE) return VULKAN_COST_COOPERATIVE + push[4];
-        if (pipeline_kind == VULKAN_PIPELINE_ATTENTION_SUBGROUP) return VULKAN_COST_ATTENTION_SUBGROUP + (push[2] / push[3]) * VK_FAST_ATTENTION_ROWS + push[VK_PUSH_ATTENTION_TILE];
-        if (pipeline_kind == VULKAN_PIPELINE_GROUP_PARTIAL) return VULKAN_COST_GROUP_PARTIAL;
-        if (pipeline_kind == VULKAN_PIPELINE_GROUP_MERGE) return VULKAN_COST_GROUP_MERGE;
-        if (pipeline_kind == VULKAN_PIPELINE_GROUP_APPLY) return VULKAN_COST_GROUP_APPLY;
-        if (pipeline_kind == VULKAN_PIPELINE_IM2COL) return VULKAN_COST_IM2COL;
-        if (pipeline_kind == VULKAN_PIPELINE_ATTENTION) return VULKAN_COST_ATTENTION;
+        switch (pipeline_kind) {
+        case VULKAN_PIPELINE_MATRIX:
+            return (push[2] == 1? VULKAN_COST_VECTOR : VULKAN_COST_MATRIX) + push[4];
+        case VULKAN_PIPELINE_MMQ:
+            return VULKAN_COST_MMQ + push[4];
+        case VULKAN_PIPELINE_QUANTIZE:
+            return VULKAN_COST_QUANTIZE;
+        case VULKAN_PIPELINE_COOPERATIVE:
+            return VULKAN_COST_COOPERATIVE + push[4];
+        case VULKAN_PIPELINE_ATTENTION_SUBGROUP:
+            return VULKAN_COST_ATTENTION_SUBGROUP + (push[2] / push[3]) * VK_FAST_ATTENTION_ROWS + push[VK_PUSH_ATTENTION_TILE];
+        case VULKAN_PIPELINE_GROUP_PARTIAL:
+            return VULKAN_COST_GROUP_PARTIAL;
+        case VULKAN_PIPELINE_GROUP_MERGE:
+            return VULKAN_COST_GROUP_MERGE;
+        case VULKAN_PIPELINE_GROUP_APPLY:
+            return VULKAN_COST_GROUP_APPLY;
+        case VULKAN_PIPELINE_IM2COL:
+            return VULKAN_COST_IM2COL;
+        case VULKAN_PIPELINE_ATTENTION:
+            return VULKAN_COST_ATTENTION;
+        case VULKAN_PIPELINE_ATTENTION_LARGE:
+            return VULKAN_COST_ATTENTION_LARGE;
+        default:
+            break;
+        }
         if (push[0] == VK_OP_DECODE) return VULKAN_COST_DECODE + push[3];
         return push[0];
     }
@@ -791,7 +809,7 @@ struct VulkanState {
             work = (VK_COMPUTE_LANES / VK_MMQ_PACKED_WORDS) * MODEL_Q8_BLOCK;
         } else if (pipeline_kind == VULKAN_PIPELINE_IM2COL) {
             work = double(push[5]) * push[6] * push[6];
-        } else if (pipeline_kind == VULKAN_PIPELINE_ATTENTION || pipeline_kind == VULKAN_PIPELINE_ATTENTION_SUBGROUP) {
+        } else if (pipeline_kind == VULKAN_PIPELINE_ATTENTION || pipeline_kind == VULKAN_PIPELINE_ATTENTION_LARGE || pipeline_kind == VULKAN_PIPELINE_ATTENTION_SUBGROUP) {
             uint32_t tile = pipeline_kind == VULKAN_PIPELINE_ATTENTION_SUBGROUP? push[VK_PUSH_ATTENTION_TILE] : VK_ATTENTION_QUERY_TILE;
             uint64_t last_query = (uint64_t(base) + groups - 1) / push[3] * tile;
             double keys = push[6]? double(std::min(uint64_t(push[5]),last_query + tile)) : push[5];
@@ -864,16 +882,42 @@ struct VulkanState {
             before.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
             vkCmdPipelineBarrier(batch.command,VK_PIPELINE_STAGE_HOST_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,0,1,&before,0,nullptr,0,nullptr);
             VkPipeline selected = compute;
-            if (pipeline_kind == VULKAN_PIPELINE_MATRIX) selected = parameters[2] == 1? vector : matrix;
-            else if (pipeline_kind == VULKAN_PIPELINE_MMQ) selected = mmq.find(parameters[4])->second;
-            else if (pipeline_kind == VULKAN_PIPELINE_QUANTIZE) selected = quantize;
-            else if (pipeline_kind == VULKAN_PIPELINE_COOPERATIVE) selected = cooperative;
-            else if (pipeline_kind == VULKAN_PIPELINE_ATTENTION_SUBGROUP) selected = attention_pipeline(parameters);
-            else if (pipeline_kind == VULKAN_PIPELINE_IM2COL) selected = im2col;
-            else if (pipeline_kind == VULKAN_PIPELINE_ATTENTION) selected = attention;
-            else if (pipeline_kind == VULKAN_PIPELINE_GROUP_PARTIAL) selected = group_partial;
-            else if (pipeline_kind == VULKAN_PIPELINE_GROUP_MERGE) selected = group_merge;
-            else if (pipeline_kind == VULKAN_PIPELINE_GROUP_APPLY) selected = group_apply;
+            switch (pipeline_kind) {
+                case VULKAN_PIPELINE_MATRIX:
+                    selected = parameters[2] == 1? vector : matrix;
+                    break;
+                case VULKAN_PIPELINE_MMQ:
+                    selected = mmq.find(parameters[4])->second;
+                    break;
+                case VULKAN_PIPELINE_QUANTIZE:
+                    selected = quantize;
+                    break;
+                case VULKAN_PIPELINE_COOPERATIVE:
+                    selected = cooperative;
+                    break;
+                case VULKAN_PIPELINE_ATTENTION_SUBGROUP:
+                    selected = attention_pipeline(parameters);
+                    break;
+                case VULKAN_PIPELINE_IM2COL:
+                    selected = im2col;
+                    break;
+                case VULKAN_PIPELINE_ATTENTION:
+                    selected = attention;
+                    break;
+                case VULKAN_PIPELINE_ATTENTION_LARGE:
+                    if (!attention_large) attention_large = pipeline(pixelina_attention_shader,sizeof(pixelina_attention_shader),{VK_ATTENTION_DIM_SPECIALIZATION},{VK_QWEN_ATTENTION_MAX_DIM});
+                    selected = attention_large;
+                    break;
+                case VULKAN_PIPELINE_GROUP_PARTIAL:
+                    selected = group_partial;
+                    break;
+                case VULKAN_PIPELINE_GROUP_MERGE:
+                    selected = group_merge;
+                    break;
+                case VULKAN_PIPELINE_GROUP_APPLY:
+                    selected = group_apply;
+                    break;
+            }
             if (!selected) return false;
             vkCmdBindPipeline(batch.command,VK_PIPELINE_BIND_POINT_COMPUTE,selected);
             VkDescriptorSet descriptor_set = batch.descriptors[batch.recorded];
@@ -892,7 +936,7 @@ struct VulkanState {
             else if (pipeline_kind == VULKAN_PIPELINE_COOPERATIVE) name = "matmul_coop";
             else if (pipeline_kind == VULKAN_PIPELINE_QUANTIZE) name = "quantize_q8_1";
             else if (pipeline_kind == VULKAN_PIPELINE_ATTENTION_SUBGROUP) name = "attention_subgroup";
-            else if (pipeline_kind == VULKAN_PIPELINE_ATTENTION) name = "attention";
+            else if (pipeline_kind == VULKAN_PIPELINE_ATTENTION || pipeline_kind == VULKAN_PIPELINE_ATTENTION_LARGE) name = "attention";
             else if (pipeline_kind == VULKAN_PIPELINE_IM2COL) name = "im2col";
             else if (pipeline_kind == VULKAN_PIPELINE_GROUP_PARTIAL) name = "groupnorm_partial";
             else if (pipeline_kind == VULKAN_PIPELINE_GROUP_MERGE) name = "groupnorm_merge";
@@ -982,6 +1026,37 @@ bool VulkanSession::validate_dimensions(const PixSettings &settings) const
     return largest <= state->properties.limits.maxStorageBufferRange;
 }
 
+bool VulkanSession::memory_limits(uint64_t &bytes, uint64_t &range, bool &shared) const
+{
+    if (!state) return false;
+    bytes = state->heap_limit;
+    range = state->properties.limits.maxStorageBufferRange;
+    shared = state->properties.deviceType != VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU;
+    if (state->memory_properties) {
+        VkPhysicalDeviceMemoryBudgetPropertiesEXT budget = {};
+        budget.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT;
+        VkPhysicalDeviceMemoryProperties2KHR memory = {};
+        memory.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2_KHR;
+        memory.pNext = &budget;
+        state->memory_properties(state->physical,&memory);
+        uint64_t capacity = budget.heapBudget[state->memory_heap],usage = budget.heapUsage[state->memory_heap];
+        if (capacity) bytes = std::min(bytes,capacity > usage? capacity - usage : 0);
+    }
+    return bytes != 0;
+}
+
+bool VulkanSession::prepare_stage(uint64_t activation_bytes, uint64_t scratch_bytes)
+{
+    if (!state || activation_bytes > state->heap_limit || scratch_bytes > state->heap_limit - activation_bytes || !state->synchronize()) return false;
+    while (!state->weights.empty()) state->evict();
+    if (!state->synchronize()) return false;
+    state->trim();
+    uint64_t reserve = std::max(uint64_t(state->allocated),activation_bytes + scratch_bytes);
+    if (reserve >= state->heap_limit) return false;
+    state->cache_limit = size_t(std::min(packed_weight_budget,uint64_t(state->heap_limit) - reserve));
+    return state->cache_limit != 0;
+}
+
 bool vulkan_available(std::string &description)
 {
     VulkanSession session;
@@ -1045,7 +1120,7 @@ void vulkan_pointwise(unsigned operation, PixTensor &destination, const PixTenso
     push[2] = uint32_t(destination.channels);
     push[3] = part;
     push[4] = third != nullptr;
-    if (operation == VK_OP_AFFINE) {
+    if (operation == VK_OP_AFFINE || operation == VK_OP_EULER) {
         push[3] = float_bits(scale);
         push[4] = float_bits(bias);
     }
@@ -1064,13 +1139,13 @@ PixTensor vulkan_attention(const PixTensor &q, const PixTensor &k, const PixTens
     push[4] = uint32_t(kv_heads);
     push[5] = uint32_t(k.rows);
     push[6] = causal;
-    bool subgroup = active_state->subgroup_size && q.rows >= VK_FAST_ATTENTION_MIN_ROWS && (q.channels / heads) % (VK_ATTENTION_VECTOR * VK_FAST_ATTENTION_D_SPLIT) == 0;
+    bool subgroup = active_state->subgroup_size && q.channels / heads <= VK_ATTENTION_MAX_DIM && q.rows >= VK_FAST_ATTENTION_MIN_ROWS && (q.channels / heads) % (VK_ATTENTION_VECTOR * VK_FAST_ATTENTION_D_SPLIT) == 0;
     uint32_t tile = subgroup? (q.rows > VK_FAST_ATTENTION_SMALL_ROWS && k.rows >= VK_FAST_ATTENTION_LARGE_KEYS? VK_FAST_ATTENTION_ROWS : VK_FAST_ATTENTION_SMALL_ROWS) : VK_ATTENTION_QUERY_TILE;
     if (subgroup) {
         // Use the passing profile-sized tiles; retain the existing choice for other dimensions.
         if (q.rows > VK_FAST_ATTENTION_DIFFUSER_ROWS && k.rows >= VK_FAST_ATTENTION_LARGE_KEYS) {
             if (q.channels / heads == VK_FAST_ATTENTION_DEFAULT_DIM) tile = VK_FAST_ATTENTION_DIFFUSER_ROWS;
-            else if (q.channels / heads == VK_ATTENTION_MAX_DIM) tile = VK_FAST_ATTENTION_VAE_ROWS;
+            else if (q.channels / heads == VULKAN_Z_VAE_ATTENTION_DIM) tile = VK_FAST_ATTENTION_VAE_ROWS;
         }
         size_t shared_per_row = (q.channels / heads / VK_ATTENTION_VECTOR + 1) * VK_ATTENTION_VECTOR * sizeof(float);
         while (tile > VK_FAST_ATTENTION_MIN_ROWS && tile * shared_per_row > active_state->properties.limits.maxComputeSharedMemorySize) tile /= 2;
@@ -1080,7 +1155,8 @@ PixTensor vulkan_attention(const PixTensor &q, const PixTensor &k, const PixTens
         }
     }
     push[VK_PUSH_ATTENTION_TILE] = tile;
-    if (!active_state->dispatch(subgroup? VULKAN_PIPELINE_ATTENTION_SUBGROUP : VULKAN_PIPELINE_ATTENTION,push,{q.values.data(),k.values.data(),v.values.data(),nullptr,output.values.data()},uint32_t((q.rows + tile - 1) / tile * heads))) return {};
+    unsigned portable = q.channels / heads > VK_ATTENTION_MAX_DIM? VULKAN_PIPELINE_ATTENTION_LARGE : VULKAN_PIPELINE_ATTENTION;
+    if (!active_state->dispatch(subgroup? VULKAN_PIPELINE_ATTENTION_SUBGROUP : portable,push,{q.values.data(),k.values.data(),v.values.data(),nullptr,output.values.data()},uint32_t((q.rows + tile - 1) / tile * heads))) return {};
     return output;
 }
 
@@ -1212,6 +1288,132 @@ void vulkan_bias(PixTensor &output, const std::vector<float> &bias)
     PixTensor affine(1,bias.size());
     std::copy(bias.begin(),bias.end(),affine.values.begin());
     vulkan_pointwise(VK_OP_BIAS,output,&affine,nullptr);
+}
+
+PixTensor vulkan_l2norm(const PixTensor &input, const std::vector<float> &weight, float epsilon)
+{
+    PixTensor output(input.rows,input.channels),affine(1,weight.size());
+    std::copy(weight.begin(),weight.end(),affine.values.begin());
+    VulkanPush push = {};
+    push[0] = VK_OP_L2NORM;
+    push[1] = uint32_t(input.rows);
+    push[2] = uint32_t(input.channels);
+    push[4] = float_bits(epsilon);
+    push[5] = !weight.empty();
+    if (!active_state->dispatch(VULKAN_PIPELINE_GENERAL,push,{input.values.data(),affine.values.data(),nullptr,nullptr,output.values.data()},uint32_t(input.rows))) return {};
+    return output;
+}
+
+PixTensor vulkan_attention(const PixTensor &q, const PixTensor &k, const PixTensor &v, size_t heads, size_t kv_heads, const std::vector<PixAttentionRange> &ranges, size_t query_offset)
+{
+    if (q.channels / heads > VULKAN_MAX_ATTENTION_DIM || query_offset > UINT32_MAX - q.rows) return {};
+    PixTensor output(q.rows,q.channels);
+    VulkanPush push = {};
+    push[0] = VK_OP_ATTENTION;
+    push[1] = uint32_t(q.rows);
+    push[2] = uint32_t(q.channels);
+    push[3] = uint32_t(heads);
+    push[4] = uint32_t(kv_heads);
+    push[5] = uint32_t(k.rows);
+    push[VK_PUSH_QUERY_OFFSET] = uint32_t(query_offset);
+    push[VK_PUSH_ATTENTION_TILE] = VK_ATTENTION_QUERY_TILE;
+    for (const PixAttentionRange &range : ranges) {
+        push[6] = range.causal;
+        push[VK_PUSH_QUERY_BEGIN] = uint32_t(range.query_begin);
+        push[VK_PUSH_QUERY_END] = uint32_t(range.query_end);
+        push[VK_PUSH_KEY_END] = uint32_t(range.key_end);
+        size_t tiles = (range.query_end - range.query_begin + VK_ATTENTION_QUERY_TILE - 1) / VK_ATTENTION_QUERY_TILE;
+        unsigned pipeline = q.channels / heads > VK_ATTENTION_MAX_DIM? VULKAN_PIPELINE_ATTENTION_LARGE : VULKAN_PIPELINE_ATTENTION;
+        if (!active_state->dispatch(pipeline,push,{q.values.data(),k.values.data(),v.values.data(),nullptr,output.values.data()},uint32_t(tiles * heads))) return {};
+    }
+    return output;
+}
+
+bool vulkan_rows(const PixTensor &source, PixTensor &destination, const std::vector<size_t> &rows, bool scatter)
+{
+    if (rows.empty()) return false;
+    void* indices = active_state->allocate(rows.size() * sizeof(uint32_t));
+    if (!indices) return false;
+    uint32_t* mapped = static_cast<uint32_t*>(indices);
+    for (size_t i = 0; i < rows.size(); i++) mapped[i] = uint32_t(rows[i]);
+    VulkanPush push = {};
+    push[0] = scatter? VK_OP_SCATTER : VK_OP_GATHER;
+    push[1] = uint32_t(rows.size());
+    push[2] = uint32_t(source.channels);
+    bool result = active_state->dispatch(VULKAN_PIPELINE_GENERAL,push,{source.values.data(),indices,nullptr,nullptr,destination.values.data()},groups_for(rows.size() * source.channels));
+    active_state->release(indices);
+    return result;
+}
+
+PixTensor vulkan_conv(const PixModelFile &model, const std::string &name, const PixTensor &input, size_t width, size_t height, const PixConv2D &geometry, bool with_bias)
+{
+    const PixWeight &weight = model.tensor(name + WEIGHT_SUFFIX);
+    size_t inner = size_t(weight.shape[0] * weight.shape[1]) * input.channels;
+    size_t output_width = (width + geometry.left + geometry.right - weight.shape[0]) / geometry.stride_x + 1;
+    size_t output_height = (height + geometry.top + geometry.bottom - weight.shape[1]) / geometry.stride_y + 1;
+    PixTensor output(output_width * output_height,size_t(weight.shape.back()));
+    PixWeight flattened = weight;
+    flattened.shape = {inner,output.channels};
+    std::vector<float> vector;
+    if (with_bias) vector = tensor_vector(model,name + BIAS_SUFFIX);
+    PixTensor bias(1,vector.size());
+    std::copy(vector.begin(),vector.end(),bias.values.begin());
+    VulkanPush matrix_push = {};
+    matrix_push[1] = uint32_t(output.channels);
+    matrix_push[3] = uint32_t(inner);
+    matrix_push[4] = weight.type;
+    matrix_push[5] = uint32_t(weight_bytes({inner},weight.type));
+    matrix_push[6] = uint32_t(output.channels);
+    matrix_push[8] = with_bias;
+    for (size_t base = 0; base < output.rows; base += VK_CONV_TILE_PIXELS) {
+        size_t count = std::min(size_t(VK_CONV_TILE_PIXELS),output.rows - base);
+        PixTensor patches(count,inner);
+        VulkanPush patch_push = {};
+        patch_push[1] = uint32_t(count);
+        patch_push[3] = uint32_t(width);
+        patch_push[4] = uint32_t(height);
+        patch_push[5] = uint32_t(input.channels);
+        patch_push[6] = uint32_t(weight.shape[0]);
+        patch_push[7] = uint32_t(base);
+        patch_push[8] = uint32_t(output_width);
+        patch_push[9] = uint32_t(weight.shape[1]);
+        patch_push[10] = uint32_t(geometry.stride_x);
+        patch_push[11] = uint32_t(geometry.stride_y);
+        patch_push[12] = uint32_t(geometry.left);
+        patch_push[13] = uint32_t(geometry.top);
+        if (!active_state->dispatch(VULKAN_PIPELINE_IM2COL,patch_push,{input.values.data(),nullptr,nullptr,nullptr,patches.values.data()},uint32_t(count))) return {};
+        matrix_push[2] = uint32_t(count);
+        matrix_push[7] = uint32_t(base * output.channels);
+        void* packed = active_state->weight(model,flattened);
+        if (!packed || !active_state->multiply(matrix_push,{patches.values.data(),bias.values.data(),nullptr,packed,output.values.data()})) return {};
+    }
+    return output;
+}
+
+bool vulkan_shortcut(const PixTensor &source, PixTensor &destination, size_t width, size_t temporal, bool up, bool spatial)
+{
+    VulkanPush push = {};
+    push[0] = VK_OP_SHORTCUT;
+    push[1] = uint32_t(destination.rows);
+    push[2] = uint32_t(destination.channels);
+    push[3] = uint32_t(source.channels);
+    push[4] = uint32_t(width);
+    push[5] = spatial? 2 : 1;
+    push[6] = uint32_t(temporal);
+    push[7] = up;
+    return active_state->dispatch(VULKAN_PIPELINE_GENERAL,push,{source.values.data(),nullptr,nullptr,nullptr,destination.values.data()},groups_for(destination.values.size()));
+}
+
+void vulkan_qwen_modulate(PixTensor &destination, const PixTensor &parameters, size_t target_begin, size_t part, const PixTensor* residual)
+{
+    VulkanPush push = {};
+    push[0] = residual? VK_OP_QWEN_RESIDUAL : VK_OP_QWEN_SCALE;
+    push[1] = uint32_t(destination.rows);
+    push[2] = uint32_t(destination.channels);
+    push[3] = uint32_t(part);
+    push[4] = uint32_t(target_begin);
+    push[5] = uint32_t(parameters.channels);
+    if (!active_state->dispatch(VULKAN_PIPELINE_GENERAL,push,{destination.values.data(),parameters.values.data(),residual? residual->values.data() : nullptr,nullptr,destination.values.data()},groups_for(destination.values.size()))) destination = PixTensor();
 }
 
 #else /* PIXELINA_WITH_VULKAN */

@@ -29,7 +29,8 @@
 #define VULKAN_DEVICE_RANK_VIRTUAL 2
 #define VULKAN_DEVICE_RANK_CPU 1
 #define VULKAN_VAE_FINAL_CHANNELS 128
-#define VULKAN_MAX_ATTENTION_DIM VK_ATTENTION_MAX_DIM
+#define VULKAN_MAX_ATTENTION_DIM VK_QWEN_ATTENTION_MAX_DIM
+#define VULKAN_Z_VAE_ATTENTION_DIM 512
 #define VULKAN_CACHE_RESERVE_BYTES (512u * 1024u * 1024u)
 #define VULKAN_PIPELINE_GENERAL 0
 #define VULKAN_PIPELINE_MATRIX 1
@@ -42,6 +43,7 @@
 #define VULKAN_PIPELINE_GROUP_PARTIAL 8
 #define VULKAN_PIPELINE_GROUP_MERGE 9
 #define VULKAN_PIPELINE_GROUP_APPLY 10
+#define VULKAN_PIPELINE_ATTENTION_LARGE 11
 #define VULKAN_MAX_BATCH_SECONDS 0.5
 #define VULKAN_PREDICTION_MARGIN 2.0
 #define VULKAN_RATE_DECAY 0.75
@@ -52,6 +54,7 @@
 #define VULKAN_COST_MATRIX 0x100
 #define VULKAN_COST_VECTOR 0x200
 #define VULKAN_COST_ATTENTION 0x300
+#define VULKAN_COST_ATTENTION_LARGE 0x301
 #define VULKAN_COST_IM2COL 0x400
 #define VULKAN_COST_DECODE 0x500
 #define VULKAN_COST_MMQ 0x600
@@ -73,6 +76,8 @@ struct VulkanOptions {
 bool vulkan_configure(const VulkanOptions &options);
 
 struct PixTensor;
+struct PixAttentionRange;
+struct PixConv2D;
 struct VulkanState;
 std::shared_ptr<VulkanState> vulkan_active_state();
 void* vulkan_allocate(const std::shared_ptr<VulkanState> &state, size_t bytes);
@@ -120,23 +125,34 @@ class VulkanSession {
     std::shared_ptr<VulkanState> state; // independent Vulkan compute context
 public:
     VulkanSession() = default;
-    bool initialize();
     ~VulkanSession();
+
+    bool initialize();
     std::string device_name() const;
     bool validate_dimensions(const PixSettings &settings) const;
+    bool memory_limits(uint64_t &bytes, uint64_t &range, bool &shared) const;
+    bool prepare_stage(uint64_t activation_bytes, uint64_t scratch_bytes);
+
+    uint64_t packed_weight_budget = UINT64_MAX; // per-job cache admission after host/device planning
 };
 
 bool vulkan_matmul(const PixModelFile &file, const PixWeight &weight, const float* input, size_t columns, float* output);
 PixTensor vulkan_norm(const PixTensor &input, const std::vector<float> &weight, float epsilon, bool centered);
+PixTensor vulkan_l2norm(const PixTensor &input, const std::vector<float> &weight, float epsilon);
 void vulkan_pointwise(unsigned operation, PixTensor &destination, const PixTensor* second, const PixTensor* third, unsigned part = 0, float scale = 0, float bias = 0);
 PixTensor vulkan_attention(const PixTensor &q, const PixTensor &k, const PixTensor &v, size_t heads, size_t kv_heads, bool causal);
+PixTensor vulkan_attention(const PixTensor &q, const PixTensor &k, const PixTensor &v, size_t heads, size_t kv_heads, const std::vector<PixAttentionRange> &ranges, size_t query_offset);
 void vulkan_rope(PixTensor &tensor, size_t heads, const std::vector<float> &cosine, const std::vector<float> &sine, bool interleaved);
 PixTensor vulkan_conv(const PixModelFile &model, const std::string &name, const PixTensor &input, size_t width, size_t height);
+PixTensor vulkan_conv(const PixModelFile &model, const std::string &name, const PixTensor &input, size_t width, size_t height, const PixConv2D &geometry, bool bias);
 PixTensor vulkan_groupnorm(const PixModelFile &model, const std::string &name, const PixTensor &input);
 PixTensor vulkan_embedding(const PixModelFile &model, const PixWeight &weight, const std::vector<int> &ids);
 void vulkan_copy_rows(const PixTensor &source, PixTensor &destination, size_t rows, size_t source_row = 0, size_t source_feature = 0, size_t destination_row = 0);
 void vulkan_layout(unsigned operation, const PixTensor &source, PixTensor &destination, size_t width, size_t patch = 0);
 void vulkan_bias(PixTensor &output, const std::vector<float> &bias);
+bool vulkan_rows(const PixTensor &source, PixTensor &destination, const std::vector<size_t> &rows, bool scatter);
+bool vulkan_shortcut(const PixTensor &source, PixTensor &destination, size_t width, size_t temporal, bool up, bool spatial);
+void vulkan_qwen_modulate(PixTensor &destination, const PixTensor &parameters, size_t target_begin, size_t part, const PixTensor* residual);
 
 #endif /* PIXELINA_WITH_VULKAN */
 

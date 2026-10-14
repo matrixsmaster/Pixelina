@@ -10,10 +10,11 @@
 #include <SDL.h>
 #include "storage.h"
 #include "pixuilib.h"
+#include "inference.h"
 #include <array>
 #include <atomic>
 
-#define PIXELINA_ABOUT { PIXELINA_NAME, "(C) Dmitry 'sciloaf' Solovyev, 2026", "Z-Image Turbo image generation", "Supports inference on CPU and Vulkan" }
+#define PIXELINA_ABOUT { PIXELINA_NAME, "(C) Dmitry 'sciloaf' Solovyev, 2026", "Z-Image Turbo image generation", "Qwen Image 2.1 image editing" }
 
 #define UI_START_WIDTH 1100
 #define UI_CAPTION_SEPARATOR " - "
@@ -31,6 +32,14 @@
 #define UI_FIELD_INPUT_Y 18
 #define UI_FRAME_DELAY 16
 #define UI_SETTINGS_COUNT 8
+#define UI_EDIT_SETTINGS_COUNT 9
+#define UI_SETTINGS_PAGES 2
+#define UI_SETTINGS_FOOTER (UI_FIELD_HEIGHT * 2 + UI_MARGIN)
+#define CMD_OPEN_IMAGE 14
+#define CMD_CLEAR 15
+#define CMD_AUTO_SEED 16
+#define UI_SETTINGS_MIN_WIDTH 240
+#define UI_INVALID_EDIT_NUMBERS "Seed, dimensions, steps and reference resolution must be valid numbers."
 #define UI_SETTINGS_ROW 48
 #define CMD_OPEN 1
 #define CMD_SAVE 2
@@ -51,6 +60,7 @@
 #define UI_STOPPING_TEXT "Stopping..."
 #define UI_INVALID_NUMBERS "Seed, dimensions, steps and shift must be valid numbers."
 #define UI_STOPPED_TEXT "Generation stopped"
+#define UI_READY_TEXT "Ready"
 
 enum PixelinaGroup {
     UI_PROMPT_GROUP,UI_SETTINGS_GROUP,UI_CAROUSEL_GROUP,UI_IMAGE_GROUP,UI_GROUP_COUNT
@@ -65,11 +75,27 @@ enum PixelinaField {
     UI_DIFFUSER_FIELD,UI_ENCODER_FIELD,UI_VAE_FIELD
 };
 
+enum PixelinaPage {
+    UI_GENERATE_PAGE,UI_EDIT_PAGE
+};
+
+enum PixelinaEditField {
+    UI_EDIT_SEED,UI_EDIT_WIDTH,UI_EDIT_HEIGHT,UI_EDIT_STEPS,UI_EDIT_RESOLUTION,
+    UI_EDIT_DIFFUSER,UI_EDIT_ENCODER,UI_EDIT_VISION,UI_EDIT_VAE
+};
+
+struct PixJob {
+    PixRecord parameters; // unresolved immutable result metadata
+    PixSettings generate_settings; // resolved Generate execution settings
+    PixEditSettings edit_settings; // resolved Edit execution settings
+    std::vector<PixImage> references; // owned complete reference planes
+};
+
+using PixJobInference = std::function<PixImage(const PixJob&,const InferenceProgress&,int&)>;
+
 class PixUISDLCanvas : public PixUICanvas
 {
 public:
-    SDL_Renderer* renderer = nullptr; // application renderer
-    SDL_Window* window = nullptr; // application native window
     void fill(const PixUIRect &rect, unsigned color) override;
     void point(int x, int y, unsigned color) override;
     void image(void* texture, const PixUIRect &rect) override;
@@ -84,6 +110,9 @@ public:
     bool maximized() const override;
     void window_title(const std::string &title) override;
     PixUIEvent translate(const SDL_Event &input);
+
+    SDL_Renderer* renderer = nullptr; // application renderer
+    SDL_Window* window = nullptr; // application native window
 
 private:
     unsigned draw_color = 0; // cached renderer draw color
@@ -106,6 +135,9 @@ public:
 class PixelinaForm : public PixUIForm
 {
 public:
+    explicit PixelinaForm(PixUICanvas &context);
+    void layout() override;
+
     std::string caption = PIXELINA_NAME; // application window caption
     PixUIMemo* prompt; // prompt editor owned by its group
     std::array<PixUIEdit*,UI_SETTINGS_COUNT> fields; // owned settings editors
@@ -115,8 +147,11 @@ public:
     PixUICarousel* carousel; // complete saved-image widget
     PixUIImageView* image; // complete image widget
     PixUIStatusBar* status; // complete status widget
-    explicit PixelinaForm(PixUICanvas &context);
-    void layout() override;
+    PixTab* tabs; // owned settings tab control
+    std::array<PixTabGroup*,UI_SETTINGS_PAGES> pages; // owned settings pages
+    std::array<PixUIEdit*,UI_EDIT_SETTINGS_COUNT> edit_fields; // owned Edit editors
+    std::array<PixUIButton*,UI_EDIT_SETTINGS_COUNT> edit_browse = {}; // Edit model selection actions
+    std::array<PixUIButton*,UI_SETTINGS_PAGES> random_seed = {}; // seed randomization actions
 
 private:
     PixUIPanel* menu_background; // full-width menu background
@@ -134,6 +169,8 @@ public:
     int run();
 
 private:
+    friend struct PixelinaTest;
+
     PixUISDLCanvas canvas; // shared renderer and control capture
     PixelinaForm main_form{canvas}; // owns persistent workspace controls
     PixUIMenu* menus = nullptr; // borrowed menu root owned by main_form
@@ -155,22 +192,24 @@ private:
     double worker_seconds = 0; // measured complete generation time
     float generation_progress = 0; // UI progress snapshot
     double generation_seconds = 0; // last complete generation duration
-    std::string job_prompt; // immutable prompt snapshot
-    PixSettings job_parameters; // unresolved model filenames and generation settings for the record
-    PixSettings job_settings; // immutable generation snapshot
-    PixSettings image_settings; // generation settings for the current image
-    std::string image_prompt; // saved prompt for the current image
-    PixImage image; // decoded/generated RGB pixels
+    PixJob job; // frozen settings, prompt and references read by the worker
+    PixRecord image_record; // frozen generation metadata of the displayed image
+    bool image_has_record = false; // current picture has generation metadata
+    std::string image_source_path; // absolute current picture provenance, empty for temporary results
+    std::string launch_directory; // fixed model-path resolution directory
+    PixEditSettings edit_settings; // independent Edit page values
+    PixImage image; // complete current RGB and optional alpha planes
     bool unsaved = false; // current image requires a new database record
     bool running = true; // event-loop lifetime
     bool busy = false; // model worker active
+    bool auto_seed = true; // advance the active page seed after starting generation
     std::string workdir; // image/database directory
     PixSettings settings; // generation values
     std::vector<PixRecord> records; // versioned database entries
     std::string dialog_message; // modal message text
     int width = UI_START_WIDTH; // current client width
     int height = UI_START_HEIGHT; // current client height
-    std::string status = "Ready"; // status message
+    std::string status = UI_READY_TEXT; // status message
 
     void layout();
     void paint();
@@ -180,6 +219,13 @@ private:
     void message(const std::string &text);
     bool read_settings();
     void write_settings();
+    bool read_edit_settings();
+    void write_edit_settings();
+    bool capture_job();
+    void randomize_seed(size_t page);
+    void reference_resolution();
+    void generation_job(const PixJobInference &inference);
+    bool open_image(const std::string &path);
     bool open_directory(const std::string &directory);
     bool select_image(size_t index);
     void save_image();

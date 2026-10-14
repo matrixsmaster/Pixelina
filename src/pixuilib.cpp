@@ -538,7 +538,11 @@ void PixUIMemo::draw_editor()
 {
     PixUIEditor &editor = model;
     const PixUIRect &rect = bounds;
-    bool focused = active && interactive() && (!focus_owner || !focus_owner->modal_blocked);
+    bool focused = active && interactive() && (!focus_owner || (!focus_owner->modal_blocked && focus_owner->active));
+    for (PixUIObject* owner = parent; focused && owner; owner = owner->parent) {
+        PixUIForm* form = dynamic_cast<PixUIForm*>(owner);
+        if (form && !form->active) focused = false;
+    }
     canvas.bevel(rect,true);
     PixUIRect content = {rect.x + UI_CONTENT_INSET,rect.y + UI_CONTENT_INSET,rect.w - UI_CONTENT_INSET * 2 - (multiline? UI_SCROLLBAR : 0),rect.h - UI_CONTENT_INSET * 2};
     int columns = std::max(1,content.w / UI_FONT_WIDTH);
@@ -1014,6 +1018,7 @@ void PixUIForm::focus_control(PixUIMemo &memo)
     focused = &memo;
     focused->active = true;
     focused->model.reveal = true;
+    canvas.text_input(focused->bounds);
 }
 
 void PixUIForm::layout()
@@ -1199,12 +1204,22 @@ void PixUIForm::prepare_modal()
         saved_focus = nullptr;
     }
     modal_blocked = modal_dialog != nullptr;
-    if (modal_dialog) modal_dialog->center(bounds);
+    if (modal_dialog) {
+        modal_dialog->active = active;
+        modal_dialog->center(bounds);
+    }
 }
 
-PixUIGroupBox::PixUIGroupBox(PixUICanvas &context, const std::string &text) : PixUIForm(context),caption(text)
+PixUIGroupBox::PixUIGroupBox(PixUICanvas &context, const std::string &text) : PixUIForm(context),caption(text),horizontal(context),vertical(context)
 {
     clip_client = true;
+    horizontal.parent = vertical.parent = this;
+    horizontal.position = &offset_x;
+    horizontal.step = UI_FONT_WIDTH;
+    horizontal.changed = [this]() { layout(); };
+    vertical.position = &scroll;
+    vertical.vertical = true;
+    vertical.changed = [this]() { layout(); };
 }
 
 void PixUIGroupBox::place(PixUIObject &child, const PixUIRect &rect, int flags)
@@ -1220,6 +1235,7 @@ void PixUIGroupBox::reveal(PixUIObject &child)
     auto found = std::find_if(placements.begin(),placements.end(),[&child](const PixUIPlacement &placement) { return placement.child == &child; });
     if (found == placements.end()) return;
     scroll = std::max(0,found->rect.y - client.h / 2);
+    offset_x = std::max(0,found->rect.x - client.w / 2);
     layout();
 }
 
@@ -1227,6 +1243,8 @@ void PixUIGroupBox::clear()
 {
     placements.clear();
     scroll = 0;
+    offset_x = 0;
+    horizontal.visible = vertical.visible = false;
     PixUIForm::clear();
 }
 
@@ -1239,14 +1257,35 @@ void PixUIGroupBox::remove(PixUIObject &child)
 void PixUIGroupBox::layout()
 {
     client = {bounds.x + inset_x,bounds.y + inset_top,std::max(0,bounds.w - inset_x * 2),std::max(0,bounds.h - inset_top - inset_bottom)};
-    scroll = std::max(0,std::min(scroll,std::max(0,content_height - client.h)));
+    int required_width = content_width,required_height = content_height;
+    for (const PixUIPlacement &placement : placements) {
+        if (!(placement.flags & (PIXUI_STRETCH_X | PIXUI_ALIGN_RIGHT))) required_width = std::max(required_width,placement.rect.x + placement.rect.w);
+        if (!(placement.flags & (PIXUI_STRETCH_Y | PIXUI_ALIGN_BOTTOM))) required_height = std::max(required_height,placement.rect.y + placement.rect.h);
+    }
+    bool show_horizontal = required_width > client.w,show_vertical = required_height > client.h;
+    if (show_vertical && required_width > client.w - UI_SCROLLBAR) show_horizontal = true;
+    if (show_horizontal && required_height > client.h - UI_SCROLLBAR) show_vertical = true;
+    if (show_vertical) client.w = std::max(0,client.w - UI_SCROLLBAR);
+    if (show_horizontal) client.h = std::max(0,client.h - UI_SCROLLBAR);
+    int layout_width = std::max(client.w,required_width),layout_height = std::max(client.h,required_height);
+    scroll = std::max(0,std::min(scroll,std::max(0,required_height - client.h)));
+    offset_x = std::max(0,std::min(offset_x,std::max(0,required_width - client.w)));
+    horizontal.bounds = {client.x,client.y + client.h,client.w,UI_SCROLLBAR};
+    horizontal.page = client.w;
+    horizontal.total = layout_width;
+    horizontal.visible = show_horizontal;
+    vertical.bounds = {client.x + client.w,client.y,UI_SCROLLBAR,client.h};
+    vertical.page = client.h;
+    vertical.total = layout_height;
+    vertical.step = wheel_step;
+    vertical.visible = show_vertical;
     for (const PixUIPlacement &placement : placements) {
         PixUIRect rect = placement.rect;
-        if (placement.flags & PIXUI_STRETCH_X) rect.w += client.w;
-        if (placement.flags & PIXUI_STRETCH_Y) rect.h += client.h;
-        if (placement.flags & PIXUI_ALIGN_RIGHT) rect.x += client.w;
-        if (placement.flags & PIXUI_ALIGN_BOTTOM) rect.y += client.h;
-        rect.x += client.x;
+        if (placement.flags & PIXUI_STRETCH_X) rect.w += layout_width;
+        if (placement.flags & PIXUI_STRETCH_Y) rect.h += layout_height;
+        if (placement.flags & PIXUI_ALIGN_RIGHT) rect.x += layout_width;
+        if (placement.flags & PIXUI_ALIGN_BOTTOM) rect.y += layout_height;
+        rect.x += client.x - offset_x;
         rect.y += client.y - scroll;
         rect.w = std::max(0,rect.w);
         rect.h = std::max(0,rect.h);
@@ -1260,21 +1299,182 @@ void PixUIGroupBox::draw()
 {
     if (!visible) return;
     canvas.fill(bounds,color);
-    if (border) canvas.bevel(bounds,true,false);
-    if (!caption.empty()) canvas.text(bounds.x + UI_MARGIN,bounds.y + UI_MARGIN,caption,COLOR_DARK);
+    if (border) {
+        PixUIRect frame = {bounds.x + UI_TEXT_PADDING,bounds.y + UI_MARGIN + UI_FONT_HEIGHT / 2,std::max(0,bounds.w - UI_TEXT_PADDING * 2),std::max(0,bounds.h - UI_MARGIN - UI_FONT_HEIGHT / 2 - UI_TEXT_PADDING)};
+        canvas.fill({frame.x,frame.y,frame.w,1},COLOR_DARK);
+        canvas.fill({frame.x,frame.y,1,frame.h},COLOR_DARK);
+        canvas.fill({frame.x,frame.y + frame.h - 1,frame.w,1},COLOR_DARK);
+        canvas.fill({frame.x + frame.w - 1,frame.y,1,frame.h},COLOR_DARK);
+    }
+    if (!caption.empty()) {
+        canvas.fill({bounds.x + UI_MARGIN - UI_TEXT_PADDING,bounds.y + UI_MARGIN,int(caption.size()) * UI_FONT_WIDTH + UI_TEXT_PADDING * 2,UI_FONT_HEIGHT},color);
+        canvas.text(bounds.x + UI_MARGIN,bounds.y + UI_MARGIN,caption,COLOR_DARK);
+    }
     PixUIForm::draw();
+    horizontal.draw();
+    vertical.draw();
 }
 
 bool PixUIGroupBox::event(const PixUIEvent &input)
 {
     if (!visible || !enabled) return false;
+    if (horizontal.event(input) || vertical.event(input)) return true;
     if (PixUIForm::event(input)) return true;
-    if (content_height && input.type == PIXUI_WHEEL && pixui_inside(client,input.x,input.y)) {
+    if ((horizontal.visible || vertical.visible) && input.type == PIXUI_WHEEL && pixui_inside(client,input.x,input.y)) {
         scroll -= input.wheel_y * wheel_step;
+        offset_x -= input.wheel_x * horizontal.step;
         layout();
         return true;
     }
     return false;
+}
+
+PixTabGroup::PixTabGroup(PixUICanvas &context, const std::string &text) : PixUIGroupBox(context),title(text)
+{
+    border = false;
+    inset_x = 0;
+    inset_top = 0;
+    inset_bottom = 0;
+}
+
+PixTab::PixTab(PixUICanvas &context) : PixUIGroupBox(context)
+{
+    inset_x = inset_bottom = UI_BORDER_WIDTH;
+    inset_top = UI_TAB_HEIGHT + UI_BORDER_WIDTH;
+}
+
+PixTabGroup* PixTab::add_group(const std::string &title)
+{
+    PixTabGroup* page = add<PixTabGroup>(title);
+    page->visible = false;
+    pages.push_back(page);
+    if (active_page == SIZE_MAX) select(0);
+    return page;
+}
+
+size_t PixTab::selected() const
+{
+    return active_page;
+}
+
+bool PixTab::select(size_t index)
+{
+    if (!selection_enabled || !enabled || index >= pages.size() || !pages[index]->enabled) return false;
+    if (active_page == index) return true;
+    if (active_page < pages.size()) {
+        PixTabGroup* departing = pages[active_page];
+        for (PixUIObject* owner = canvas.captured; owner; owner = owner->parent) {
+            if (owner != departing) continue;
+            canvas.release_capture();
+            break;
+        }
+        departing->visible = false;
+    }
+    active_page = index;
+    pages[index]->visible = true;
+    layout();
+    if (changed) changed(index);
+    return true;
+}
+
+void PixTab::layout()
+{
+    PixUIGroupBox::layout();
+    headers.clear();
+    int x = bounds.x + inset_x;
+    int right = bounds.x + std::max(0,bounds.w - inset_x);
+    for (PixTabGroup* page : pages) {
+        int width = std::min(std::max(0,right - x),int(page->title.size()) * UI_FONT_WIDTH + UI_TAB_PADDING * 2);
+        headers.push_back({x,bounds.y + (headers.size() == active_page? 0 : UI_TAB_RAISE),width,UI_TAB_HEIGHT - (headers.size() == active_page? 0 : UI_TAB_RAISE)});
+        x += width;
+        page->bounds = {client.x,client.y,client.w,std::max(0,client.h - footer_height)};
+        page->layout();
+    }
+}
+
+void PixTab::draw()
+{
+    if (!visible) return;
+    canvas.fill(bounds,color);
+    PixUIRect body = {bounds.x,bounds.y + UI_TAB_HEIGHT,bounds.w,std::max(0,bounds.h - UI_TAB_HEIGHT)};
+    canvas.fill({body.x,body.y,body.w,1},COLOR_DARK);
+    canvas.fill({body.x,body.y,1,body.h},COLOR_DARK);
+    canvas.fill({body.x,body.y + body.h - 1,body.w,1},COLOR_DARK);
+    canvas.fill({body.x + body.w - 1,body.y,1,body.h},COLOR_DARK);
+    canvas.bevel({body.x + 1,body.y + 1,body.w - 2,body.h - 2},false,false);
+    PixUIForm::draw();
+    PixUIRect previous,strip = {bounds.x,bounds.y,bounds.w,inset_top},effective = strip;
+    bool clipped = canvas.clip(previous);
+    if (clipped && !pixui_intersect(strip,previous,effective)) return;
+    canvas.set_clip(&effective);
+    for (size_t i = 0; i < pages.size(); i++) {
+        PixUIRect rect = headers[i];
+        if (rect.w <= 0) continue;
+        unsigned face = i == active_page? color : COLOR_FACE;
+        int slope = std::min(UI_TAB_SLOPE,rect.w / 2);
+        for (int row = 0; row < slope; row++) {
+            canvas.fill({rect.x + slope - row,rect.y + row,rect.w - (slope - row) * 2,1},face);
+            canvas.point(rect.x + slope - row - 1,rect.y + row,COLOR_DARK);
+            if (row) canvas.point(rect.x + slope - row,rect.y + row,COLOR_LIGHT);
+            canvas.point(rect.x + rect.w - slope + row,rect.y + row,COLOR_DARK);
+        }
+        canvas.fill({rect.x,rect.y + slope,rect.w,rect.h - slope},face);
+        canvas.fill({rect.x + slope,rect.y,rect.w - slope * 2,1},COLOR_DARK);
+        canvas.fill({rect.x + slope,rect.y + 1,rect.w - slope * 2,1},COLOR_LIGHT);
+        canvas.fill({rect.x,rect.y + slope,1,rect.h - slope},COLOR_DARK);
+        canvas.fill({rect.x + 1,rect.y + slope,1,rect.h - slope},COLOR_LIGHT);
+        canvas.fill({rect.x + rect.w - 1,rect.y + slope,1,rect.h - slope},COLOR_DARK);
+        if (i == active_page) canvas.fill({rect.x + 1,body.y,rect.w - 2,UI_BORDER_WIDTH},color);
+        PixUIRect header_clip;
+        if (!pixui_intersect(rect,effective,header_clip)) continue;
+        canvas.set_clip(&header_clip);
+        int label_x = rect.x + std::max(UI_TAB_PADDING,(rect.w - int(pages[i]->title.size()) * UI_FONT_WIDTH) / 2);
+        int label_y = rect.y + (rect.h - UI_FONT_HEIGHT) / 2;
+        unsigned ink = selection_enabled && pages[i]->enabled? COLOR_DARK : COLOR_DISABLED;
+        canvas.text(label_x,label_y,pages[i]->title,ink);
+        if (i == active_page) canvas.text(label_x + 1,label_y,pages[i]->title,ink);
+        canvas.set_clip(&effective);
+    }
+    canvas.set_clip(clipped? &previous : nullptr);
+}
+
+bool PixTab::event(const PixUIEvent &input)
+{
+    if (!visible || !enabled) return false;
+    if (input.type == PIXUI_DOWN && input.button == PIXUI_LEFT_BUTTON) {
+        for (size_t i = 0; i < headers.size(); i++) {
+            if (!pixui_inside(headers[i],input.x,input.y)) continue;
+            select(i);
+            return true;
+        }
+    }
+    return PixUIGroupBox::event(input);
+}
+
+void PixTab::remove(PixUIObject &child)
+{
+    auto found = std::find(pages.begin(),pages.end(),&child);
+    bool notify = false;
+    if (found != pages.end()) {
+        size_t index = size_t(found - pages.begin());
+        notify = index == active_page;
+        pages.erase(found);
+        if (pages.empty()) active_page = SIZE_MAX;
+        else if (notify) active_page = std::min(index,pages.size() - 1);
+        else if (index < active_page) active_page--;
+        for (size_t i = 0; i < pages.size(); i++) pages[i]->visible = i == active_page;
+    }
+    PixUIGroupBox::remove(child);
+    layout();
+    if (notify && changed) changed(active_page);
+}
+
+void PixTab::clear()
+{
+    pages.clear();
+    headers.clear();
+    active_page = SIZE_MAX;
+    PixUIGroupBox::clear();
 }
 
 PixUIImageView::PixUIImageView(PixUICanvas &context) : PixUIForm(context)
@@ -1661,7 +1861,7 @@ void PixUIAboutDialog::layout()
 
 PixUIFileBrowser::PixUIFileBrowser(PixUICanvas &context, PixUIFileSystem &provider, const std::string &initial) : PixUIDialog(context,"Open file","Open"),filesystem(provider)
 {
-    set_path(initial);
+    set_path(initial.empty()? filesystem.last_directory : initial);
     label = add<PixUILabel>();
     edit = add<PixUIEdit>(path);
     register_focus(*edit);
@@ -1688,7 +1888,7 @@ void PixUIFileBrowser::refresh()
     if (!filesystem.read_directory(directory,entries,message)) {
         entries.clear();
         if (error) error(message);
-    }
+    } else filesystem.last_directory = filesystem.normalize(directory);
     position = 0;
 }
 
@@ -1705,7 +1905,11 @@ void PixUIFileBrowser::accept()
         return;
     }
     if (kind == PIXUI_PATH_OTHER) return;
-    if (selected && selected(path.text)) dismiss();
+    if (selected && selected(path.text)) {
+        std::string parent = kind == PIXUI_PATH_DIRECTORY? path.text : filesystem.parent_path(path.text);
+        if (filesystem.path_kind(parent) == PIXUI_PATH_DIRECTORY) filesystem.last_directory = filesystem.normalize(parent);
+        dismiss();
+    }
 }
 
 void PixUIFileBrowser::set_path(const std::string &value)

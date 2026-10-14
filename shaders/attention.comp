@@ -14,8 +14,10 @@ layout(push_constant) uniform Push { uint p[VK_PUSH_WORDS]; };
 
 #define Br VK_ATTENTION_QUERY_TILE
 #define Bc VK_COMPUTE_LANES
-#define qf_stride (VK_ATTENTION_MAX_DIM / VK_ATTENTION_VECTOR + 1)
-#define output_chunks (VK_ATTENTION_MAX_DIM / (VK_COMPUTE_LANES * VK_ATTENTION_VECTOR))
+#define qf_stride (max_dimension / VK_ATTENTION_VECTOR + 1)
+#define output_chunks (max_dimension / (VK_COMPUTE_LANES * VK_ATTENTION_VECTOR))
+
+layout(constant_id=VK_ATTENTION_DIM_SPECIALIZATION) const uint max_dimension = VK_ATTENTION_MAX_DIM;
 
 shared vec4 Qf[Br * qf_stride];
 shared float probabilities[Br * Bc];
@@ -45,17 +47,19 @@ void main()
     uint tid = gl_LocalInvocationIndex;
     uint group = gl_WorkGroupID.x + p[VK_PUSH_GROUP_BASE];
     uint rows = p[1],channels = p[2],heads = p[3],kv_heads = p[4];
-    uint first_query = (group / heads) * Br,head = group % heads;
-    if (first_query >= rows) return;
+    uint first_query = p[VK_PUSH_QUERY_BEGIN] + (group / heads) * Br,head = group % heads;
+    uint query_end = p[VK_PUSH_QUERY_END] == 0? rows : p[VK_PUSH_QUERY_END];
+    if (first_query >= query_end) return;
     uint dimension = channels / heads,kv_head = head / (heads / kv_heads);
     uint vectors = (dimension + VK_ATTENTION_VECTOR - 1) / VK_ATTENTION_VECTOR;
-    uint keys = p[6] != 0? min(p[5],first_query + Br) : p[5];
+    uint key_end = p[VK_PUSH_KEY_END] == 0? p[5] : p[VK_PUSH_KEY_END];
+    uint keys = p[6] != 0? min(key_end,first_query + Br + p[VK_PUSH_QUERY_OFFSET]) : key_end;
     for (uint r = 0; r < Br; r++) {
         for (uint d = tid; d < vectors; d += VK_COMPUTE_LANES) {
             uint offset = (first_query + r) * channels + head * dimension + d * VK_ATTENTION_VECTOR;
             vec4 value = vec4(0);
             for (uint i = 0; i < VK_ATTENTION_VECTOR; i++) {
-                if (first_query + r < rows && d * VK_ATTENTION_VECTOR + i < dimension) value[i] = data_q[offset + i];
+                if (first_query + r < query_end && d * VK_ATTENTION_VECTOR + i < dimension) value[i] = data_q[offset + i];
             }
             Qf[r * qf_stride + d] = value;
         }
@@ -84,7 +88,7 @@ void main()
             }
         }
         for (uint r = 0; r < Br; r++) {
-            bool valid = key < keys && (p[6] == 0 || key <= first_query + r);
+            bool valid = key < keys && (p[6] == 0 || key <= first_query + r + p[VK_PUSH_QUERY_OFFSET]);
             Sf[r] = valid? Sf[r] * inversesqrt(float(dimension)) : -uintBitsToFloat(VK_FLOAT_INFINITY);
             float rowmaxf = reduce(Sf[r],true);
             float Moldf = Mf[r];
@@ -112,7 +116,7 @@ void main()
         barrier();
     }
     for (uint r = 0; r < Br; r++) {
-        if (first_query + r >= rows) continue;
+        if (first_query + r >= query_end) continue;
         for (uint d = 0; d < output_chunks; d++) {
             uint feature = (d * VK_COMPUTE_LANES + tid) * VK_ATTENTION_VECTOR;
             if (feature >= dimension) continue;

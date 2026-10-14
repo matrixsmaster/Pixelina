@@ -59,6 +59,10 @@
 #define UI_DOUBLE_CLICK_MS 500
 #define UI_FIELD_HEIGHT 24
 #define UI_TITLE_HEIGHT 24
+#define UI_TAB_HEIGHT UI_FIELD_HEIGHT
+#define UI_TAB_PADDING UI_MARGIN
+#define UI_TAB_SLOPE 4
+#define UI_TAB_RAISE 2
 #define UI_MARGIN 8
 #define UI_MENU_HEIGHT 20
 #define UI_WINDOW_TITLE_HEIGHT 24
@@ -500,15 +504,49 @@ public:
     bool event(const PixUIEvent &input) override;
 
     std::string caption; // group heading
-    unsigned color = COLOR_LIGHT; // client background
-    bool border = true; // draw the inset group frame
-    int inset_x = UI_BORDER_WIDTH,inset_top = UI_TITLE_HEIGHT,inset_bottom = UI_BORDER_WIDTH; // client margins
-    int content_height = 0; // scrollable content extent; zero disables scrolling
+    unsigned color = COLOR_LIGHT; // white group and tab-page background
+    bool border = true; // draw the outlined group frame
+    int inset_x = UI_MARGIN,inset_top = UI_TITLE_HEIGHT,inset_bottom = UI_MARGIN; // client margins
+    int content_width = 0,content_height = 0; // minimum content extent, also inferred from fixed placements
     int wheel_step = UI_LINE_HEIGHT; // vertical scroll increment
 
 private:
     std::vector<PixUIPlacement> placements; // persistent child layout constraints
     int scroll = 0; // owned vertical content offset
+    int offset_x = 0; // owned horizontal content offset
+    PixUIScrollbar horizontal,vertical; // scrollbars outside the clipped client area
+};
+
+class PixTabGroup : public PixUIGroupBox
+{
+public:
+    PixTabGroup(PixUICanvas &context, const std::string &text);
+
+    std::string title; // heading owned by the tab strip
+};
+
+class PixTab : public PixUIGroupBox
+{
+public:
+    explicit PixTab(PixUICanvas &context);
+
+    PixTabGroup* add_group(const std::string &title);
+    bool select(size_t index);
+    size_t selected() const;
+    void layout() override;
+    void draw() override;
+    bool event(const PixUIEvent &input) override;
+    void remove(PixUIObject &child) override;
+    void clear() override;
+
+    int footer_height = 0; // reserved common controls below the page body
+    bool selection_enabled = true; // page switching availability, independent of footer actions
+    std::function<void(size_t)> changed; // notification after page visibility changes
+
+private:
+    std::vector<PixTabGroup*> pages; // ordered borrowed pages owned by inherited elements
+    std::vector<PixUIRect> headers; // clipped tab hit rectangles
+    size_t active_page = SIZE_MAX; // selected page, or no page
 };
 
 class PixUIImageView : public PixUIForm
@@ -677,6 +715,8 @@ public:
     virtual PixUIPathKind path_kind(const std::string &path) = 0;
     virtual std::string join_path(const std::string &directory, const std::string &name) = 0;
     virtual std::string parent_path(const std::string &path) = 0;
+
+    std::string last_directory; // last directory visited by a browser using this provider
 };
 
 class PixUIFileBrowser : public PixUIDialog
