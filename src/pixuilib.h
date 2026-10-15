@@ -7,6 +7,7 @@
 #ifndef PIXELINA_PIXUILIB_H
 #define PIXELINA_PIXUILIB_H
 
+#include "os.h"
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -50,6 +51,7 @@
 #define UI_CHECK_MARK "[x]"
 #define UI_CLOSE_TEXT "Close"
 #define UI_CANCEL_TEXT "Cancel"
+#define UI_OK_TEXT "OK"
 #define UI_DIRECTORY_ERROR "Cannot open directory: "
 #define UI_SAVE_TEXT "Save"
 #define UI_SAVE_AS_TEXT "Save as"
@@ -72,6 +74,7 @@
 #define UI_DIALOG_BUTTON_WIDTH 80
 #define UI_DIALOG_HEIGHT 400
 #define UI_DIALOG_WIDTH 580
+#define UI_DIALOG_RESIZE_TEXT "\\"
 #define UI_ABOUT_SPACING 16
 #define UI_ABOUT_LINE_COUNT 4
 #define UI_ABOUT_ICON_SIZE 64
@@ -85,7 +88,8 @@
 #define UI_CAROUSEL_EXTRA 2
 #define UI_STATUS_PROGRESS_WIDTH 162
 #define UI_STATUS_PROGRESS_OFFSET 170
-#define UI_STATUS_TEXT_SPACE 180
+#define UI_STATUS_COUNT_WIDTH 104
+#define UI_STATUS_TIME_WIDTH 160
 #define UI_STATUS_PROGRESS_TOP 5
 #define PIXUI_STRETCH_X 1
 #define PIXUI_STRETCH_Y 2
@@ -156,15 +160,6 @@ enum PixUIHit {
     PIXUI_HIT_LEFT,PIXUI_HIT_RIGHT
 };
 
-struct PixUIFileEntry {
-    std::string name; // directory entry caption
-    bool directory = false; // entry navigates into a directory
-};
-
-enum PixUIPathKind {
-    PIXUI_PATH_MISSING,PIXUI_PATH_DIRECTORY,PIXUI_PATH_FILE,PIXUI_PATH_OTHER
-};
-
 struct PixUIDialogLayout {
     PixUIRect box,label,path,browse,up,list,hint,ok,cancel; // original modal control positions
 };
@@ -189,6 +184,7 @@ public:
     virtual void clipboard(const std::string &text) = 0;
     virtual void text_input(const PixUIRect &rect) = 0;
     virtual PixUIRect window_rect() const = 0;
+    virtual void pointer_position(int &x, int &y) const;
     virtual void window_command(PixUIWindowCommand command, const PixUIRect &rect) = 0;
     virtual bool maximized() const = 0;
     virtual void window_title(const std::string &title) = 0;
@@ -213,11 +209,13 @@ public:
     virtual void layout();
     virtual bool event(const PixUIEvent &input);
     virtual void cancel_capture();
+    virtual bool needs_repaint();
     bool interactive() const;
 
     PixUIObject* parent = nullptr; // containing form or composite control, without ownership
     PixUICanvas &canvas; // shared rendering and pointer-capture state
     PixUIRect bounds = {}; // client-space geometry used by drawing and hit testing
+    bool repaint = true; // changed control requests a complete frame
     bool visible = true; // hidden objects do not draw or receive events
     bool enabled = true; // disabled objects draw but do not receive events
 
@@ -225,6 +223,8 @@ private:
     friend class PixUIForm;
     friend class PixUIGroupBox;
     bool layout_visible = true; // container clipping preserves explicit visibility
+    PixUIRect painted_bounds; // geometry observed by the invalidation scan
+    bool painted_visible = true,painted_enabled = true; // visibility and enabled state observed by the scan
 };
 
 struct PixUIPlacement {
@@ -264,6 +264,7 @@ public:
     explicit PixUILabel(PixUICanvas &context, const std::string &text = "");
 
     void draw() override;
+    bool needs_repaint() override;
 
     std::string caption; // displayed UTF-8 label
     unsigned color = COLOR_DARK; // text color
@@ -272,6 +273,10 @@ public:
     bool centered = false; // center text horizontally and vertically
     bool wrap = false; // wrap caption to the available width
     bool underline = false; // underline the first glyph for a menu accelerator
+
+private:
+    std::string painted_caption; // last caption observed by the invalidation scan
+    unsigned painted_color = COLOR_DARK; // last text color observed by the scan
 };
 
 class PixUIButton : public PixUILabel
@@ -302,6 +307,9 @@ public:
     int wheel_step = UI_IMAGE_WHEEL_STEP; // native image wheel increment
     int offset_x = 0,offset_y = 0; // native image scroll offsets
     std::string placeholder; // label for an empty image
+
+protected:
+    void draw_image(const PixUIRect &rect);
 };
 
 class PixUIThumb : public PixUIImage
@@ -343,6 +351,8 @@ public:
     ~PixUIMemo() override;
 
     void set_text(const std::string &text);
+    void scroll_to_end();
+    bool needs_repaint() override;
     void draw() override;
     bool event(const PixUIEvent &input) override;
     void layout();
@@ -351,9 +361,11 @@ public:
     bool active = false; // receives text and keyboard input when focused
     PixUIForm* focus_owner = nullptr; // form controlling editor focus and Tab navigation
     bool multiline = true; // word wrapping and vertical scrolling
+    bool read_only = false; // permit navigation and copying while preventing text changes
     PixUIScrollbar scroll; // child scrollbar shares the memo's scroll state
 
 private:
+    uint64_t caret_phase = 0; // last drawn caret blink interval
     void edit(const PixUIEvent &event);
     void draw_editor();
     void place_cursor(int x, int y, int modifiers);
@@ -380,10 +392,12 @@ public:
 
     std::string shortcut; // right-aligned key shortcut or submenu arrow
     bool checkable = false; // reserve a checkmark column
+    bool check_column = false; // containing popup reserves the column for every row
     bool checked = false; // display the checkmark
     bool highlighted = false; // selection owned by the containing menu
     int shortcut_key = 0,shortcut_mod = 0; // accelerator owned by this item
     std::function<bool()> checked_state; // application value queried by the item
+    std::function<bool()> enabled_state; // dynamic availability queried before menu input and drawing
     std::function<std::string()> caption_state; // dynamic action caption
     std::unique_ptr<PixUIMenu> submenu; // owned submenu tree
     bool show_title = true; // draw a top-level menu-bar label
@@ -404,6 +418,7 @@ public:
     bool event(const PixUIEvent &input) override;
     bool accelerator(const PixUIEvent &input);
     bool contains(int x, int y) const;
+    bool needs_repaint() override;
 
     bool bar = false; // top-level menu bar rather than a popup
     std::vector<std::unique_ptr<PixUIMenuItem>> items; // persistent owned items
@@ -432,12 +447,15 @@ public:
     void register_focus(PixUIMemo &memo);
     void unregister_focus(PixUIMemo &memo);
     void focus_control(PixUIMemo &memo);
+    void focus_object(PixUIObject &control);
+    bool needs_repaint() override;
     template<class T, class... Args> T* add(Args&&... args)
     {
         auto element = std::make_unique<T>(canvas,std::forward<Args>(args)...);
         element->parent = this;
         T* result = element.get();
         elements.push_back(std::move(element));
+        repaint = true;
         return result;
     }
     void layout() override;
@@ -464,6 +482,7 @@ protected:
 
 private:
     friend class PixUICanvas;
+    friend class PixUICarousel;
     friend class PixUIMemo;
     bool modal_blocked = false; // owned modal state disables window manipulation
     std::unique_ptr<PixUIDialog> modal_dialog; // owned active modal, destroyed outside input dispatch
@@ -480,6 +499,7 @@ private:
     std::string window_caption; // last title sent to the platform
     std::vector<PixUIMemo*> tab_order; // registered editors in keyboard navigation order
     PixUIMemo* focused = nullptr; // currently selected editor
+    PixUIObject* keyboard_focus = nullptr; // focused non-editor, borrowed from owned descendants
     PixUIWindowCommand window_drag = PIXUI_CLOSE; // active move/resize, Close denotes no capture
     int drag_x = 0,drag_y = 0; // pointer position at capture
     PixUIRect drag_window; // window geometry at resize start
@@ -572,6 +592,7 @@ public:
     explicit PixUICarousel(PixUICanvas &context);
     ~PixUICarousel() override;
 
+    bool event(const PixUIEvent &input) override;
     void items_changed(size_t count, bool reset = false);
     void select(int index);
     void layout() override;
@@ -617,13 +638,20 @@ public:
     void layout() override;
     void draw() override;
 
+    void set_status(const std::string &message, const std::string &count, const std::string &timing, bool working, float fraction);
+
     std::string text; // application status text
     bool busy = false; // progress is active
     float progress = 0; // completed fraction
-    int margin = UI_MARGIN,progress_width = UI_STATUS_PROGRESS_WIDTH,progress_offset = UI_STATUS_PROGRESS_OFFSET,text_space = UI_STATUS_TEXT_SPACE,progress_top = UI_STATUS_PROGRESS_TOP; // configured original geometry
+    int progress_width = UI_STATUS_PROGRESS_WIDTH,progress_offset = UI_STATUS_PROGRESS_OFFSET,progress_top = UI_STATUS_PROGRESS_TOP; // configured original geometry
 
 private:
+    std::string count_text,timing_text; // image count and elapsed time or ETA panels
     PixUIForm* text_clip; // owned clipped status label container
+    PixUIForm* count_clip; // owned clipped image count panel
+    PixUIForm* timing_clip; // owned clipped timing panel
+    PixUILabel* count_label; // owned count label
+    PixUILabel* timing_label; // owned timing label
     PixUILabel* label; // owned status text
     PixUIProgress* meter; // owned progress indicator
 };
@@ -665,10 +693,13 @@ public:
     void dismiss();
     virtual void accept();
     bool event(const PixUIEvent &input) override;
+    void cancel_capture() override;
 
     std::string title; // configurable dialog title
     std::string accept_caption; // configurable primary button text
     std::function<void()> accepted; // application action after the primary button
+    bool resizable = false; // allow dragging the bottom-right sizing handle
+    int minimum_width = UI_DIALOG_WIDTH,minimum_height = UI_DIALOG_HEIGHT; // lower bounds for interactive resizing
 
 protected:
     PixUIPanel* border; // dialog frame
@@ -680,12 +711,18 @@ protected:
     int dialog_width = UI_DIALOG_WIDTH,dialog_height = UI_DIALOG_HEIGHT; // original dialog dimensions
 
     PixUIDialogLayout controls() const;
+
+private:
+    PixUILabel* resize_handle; // optional bottom-right sizing grip
+    PixUIRect available; // latest containing client rectangle
+    bool positioned = false,resizing = false; // preserve resized placement and pointer capture state
+    int resize_x = 0,resize_y = 0,resize_width = 0,resize_height = 0; // pointer and dimensions at drag start
 };
 
 class PixUIMessageDialog : public PixUIDialog
 {
 public:
-    explicit PixUIMessageDialog(PixUICanvas &context, const std::string &message, const std::string &caption, const std::string &accept = "", const std::string &cancel = "OK");
+    explicit PixUIMessageDialog(PixUICanvas &context, const std::string &message, const std::string &caption, const std::string &accept = "", const std::string &cancel = UI_OK_TEXT);
 
     void layout() override;
 
@@ -705,30 +742,17 @@ private:
     std::vector<PixUILabel*> lines; // owned About captions
 };
 
-class PixUIFileSystem
-{
-public:
-    virtual ~PixUIFileSystem() = default;
-
-    virtual bool read_directory(const std::string &path, std::vector<PixUIFileEntry> &entries, std::string &error) = 0;
-    virtual std::string normalize(const std::string &path) = 0;
-    virtual PixUIPathKind path_kind(const std::string &path) = 0;
-    virtual std::string join_path(const std::string &directory, const std::string &name) = 0;
-    virtual std::string parent_path(const std::string &path) = 0;
-
-    std::string last_directory; // last directory visited by a browser using this provider
-};
-
 class PixUIFileBrowser : public PixUIDialog
 {
 public:
-    explicit PixUIFileBrowser(PixUICanvas &context, PixUIFileSystem &provider, const std::string &initial = "");
+    explicit PixUIFileBrowser(PixUICanvas &context, const std::string &initial = "");
 
     void refresh();
     void accept() override;
     void set_path(const std::string &value);
     void layout() override;
 
+    static std::string last_directory; // last directory visited by any browser
     bool dir_selector = false; // select directories instead of file paths
     bool show_listing = true; // show navigation controls and directory listing
     std::string path_label; // configurable selection caption
@@ -737,9 +761,8 @@ public:
     std::function<void(const std::string &)> error; // application status reporting
 
 private:
-    PixUIFileSystem &filesystem; // borrowed platform filesystem provider
     PixUIEditor path; // owned editable selection
-    std::vector<PixUIFileEntry> entries; // owned current directory listing
+    std::vector<PixDirEntry> entries; // owned current directory listing
     std::string directory; // directory represented by the listing
     int position = 0; // list scroll offset
     PixUILabel* label; // path caption

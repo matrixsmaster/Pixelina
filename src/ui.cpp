@@ -4,217 +4,112 @@
  *
  * License: MIT
  */
-#include "ui.h"
-#include "inference.h"
-#include "qwen_image.h"
-#include "backend_vulkan.h"
-#include "../assets/pixelina_icon.h"
-
 #include <algorithm>
+#include <cerrno>
+#include <climits>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <iomanip>
 #include <limits>
 #include <random>
 #include <sstream>
 #include <sys/stat.h>
 #include <unistd.h>
-
-void PixUISDLCanvas::set_color(unsigned color)
-{
-    if (color_valid && draw_color == color) return;
-    SDL_SetRenderDrawColor(renderer,(color >> 16) & 255,(color >> 8) & 255,color & 255,255);
-    draw_color = color;
-    color_valid = true;
-}
-
-void PixUISDLCanvas::fill(const PixUIRect &rect, unsigned color)
-{
-    SDL_Rect target = {rect.x,rect.y,rect.w,rect.h};
-    set_color(color);
-    SDL_RenderFillRect(renderer,&target);
-}
-
-void PixUISDLCanvas::point(int x, int y, unsigned color)
-{
-    set_color(color);
-    SDL_RenderDrawPoint(renderer,x,y);
-}
-
-void PixUISDLCanvas::image(void* texture, const PixUIRect &rect)
-{
-    SDL_Rect target = {rect.x,rect.y,rect.w,rect.h};
-    SDL_RenderCopy(renderer,static_cast<SDL_Texture*>(texture),nullptr,&target);
-}
-
-bool PixUISDLCanvas::clip(PixUIRect &rect) const
-{
-    rect = clipping;
-    return clipped;
-}
-
-void PixUISDLCanvas::set_clip(const PixUIRect* rect)
-{
-    SDL_Rect target = {};
-    if (rect) target = {rect->x,rect->y,rect->w,rect->h};
-    if (SDL_RenderSetClipRect(renderer,rect? &target : nullptr)) return;
-    clipped = rect != nullptr;
-    clipping = rect? *rect : PixUIRect{};
-}
-
-uint64_t PixUISDLCanvas::ticks() const
-{
-    return SDL_GetTicks();
-}
-
-std::string PixUISDLCanvas::clipboard() const
-{
-    char* value = SDL_GetClipboardText();
-    std::string result = value? value : "";
-    SDL_free(value);
-    return result;
-}
-
-void PixUISDLCanvas::clipboard(const std::string &text)
-{
-    SDL_SetClipboardText(text.c_str());
-}
-
-void PixUISDLCanvas::text_input(const PixUIRect &rect)
-{
-    SDL_Rect target = {rect.x,rect.y,rect.w,rect.h};
-    SDL_SetTextInputRect(&target);
-}
-
-PixUIRect PixUISDLCanvas::window_rect() const
-{
-    PixUIRect result;
-    SDL_GetWindowPosition(window,&result.x,&result.y);
-    SDL_GetWindowSize(window,&result.w,&result.h);
-    return result;
-}
-
-void PixUISDLCanvas::window_command(PixUIWindowCommand command, const PixUIRect &rect)
-{
-    switch (command) {
-    case PIXUI_RESTORE:
-        SDL_RestoreWindow(window);
-        break;
-    case PIXUI_MINIMIZE:
-        SDL_MinimizeWindow(window);
-        break;
-    case PIXUI_MAXIMIZE:
-        SDL_MaximizeWindow(window);
-        break;
-    case PIXUI_MOVE:
-        SDL_SetWindowPosition(window,rect.x,rect.y);
-        break;
-    case PIXUI_RESIZE:
-        SDL_SetWindowSize(window,rect.w,rect.h);
-        break;
-    default: break;
-    }
-}
-
-bool PixUISDLCanvas::maximized() const
-{
-    return SDL_GetWindowFlags(window) & SDL_WINDOW_MAXIMIZED;
-}
-
-static int portable_modifiers(SDL_Keymod state)
-{
-    return (state & KMOD_CTRL? PIXUI_CTRL : 0) | (state & KMOD_SHIFT? PIXUI_SHIFT : 0) | (state & KMOD_ALT? PIXUI_ALT : 0);
-}
-
-PixUIEvent PixUISDLCanvas::translate(const SDL_Event &input)
-{
-    PixUIEvent result;
-    result.mod = portable_modifiers(SDL_GetModState());
-    switch (input.type) {
-    case SDL_KEYDOWN:
-        result.type = PIXUI_KEY;
-        result.mod = portable_modifiers(static_cast<SDL_Keymod>(input.key.keysym.mod));
-        switch (input.key.keysym.sym) {
-        case SDLK_RETURN:
-            result.key = PIXUI_RETURN;
-            break;
-        case SDLK_ESCAPE:
-            result.key = PIXUI_ESCAPE;
-            break;
-        case SDLK_TAB:
-            result.key = PIXUI_TAB;
-            break;
-        case SDLK_BACKSPACE:
-            result.key = PIXUI_BACKSPACE;
-            break;
-        case SDLK_DELETE:
-            result.key = PIXUI_DELETE;
-            break;
-        case SDLK_LEFT:
-            result.key = PIXUI_LEFT;
-            break;
-        case SDLK_RIGHT:
-            result.key = PIXUI_RIGHT;
-            break;
-        case SDLK_HOME:
-            result.key = PIXUI_HOME;
-            break;
-        case SDLK_END:
-            result.key = PIXUI_END;
-            break;
-        case SDLK_UP:
-            result.key = PIXUI_UP_KEY;
-            break;
-        case SDLK_DOWN:
-            result.key = PIXUI_DOWN_KEY;
-            break;
-        case SDLK_F3:
-            result.key = PIXUI_F3;
-            break;
-        case SDLK_F4:
-            result.key = PIXUI_F4;
-            break;
-        case SDLK_F5:
-            result.key = PIXUI_F5;
-            break;
-        default:
-            result.key = input.key.keysym.sym >= 0 && input.key.keysym.sym < PIXUI_SPECIAL_KEY? input.key.keysym.sym : 0;
-            break;
-        }
-        break;
-    case SDL_TEXTINPUT:
-        result.type = PIXUI_TEXT;
-        result.text = input.text.text;
-        break;
-    case SDL_MOUSEBUTTONDOWN:
-    case SDL_MOUSEBUTTONUP:
-        result.type = input.type == SDL_MOUSEBUTTONDOWN? PIXUI_DOWN : PIXUI_UP;
-        result.x = input.button.x;
-        result.y = input.button.y;
-        result.button = input.button.button == SDL_BUTTON_LEFT? PIXUI_LEFT_BUTTON : 0;
-        break;
-    case SDL_MOUSEMOTION:
-        result.type = PIXUI_MOTION;
-        result.x = input.motion.x;
-        result.y = input.motion.y;
-        break;
-    case SDL_MOUSEWHEEL:
-        result.type = PIXUI_WHEEL;
-        result.wheel_x = input.wheel.x;
-        result.wheel_y = input.wheel.y;
-        SDL_GetMouseState(&result.x,&result.y);
-        break;
-    default:
-        break;
-    }
-
-    return result;
-}
+#include "ui.h"
+#include "ui_refdlg.h"
+#include "ui_chatdlg.h"
+#include "inference.h"
+#include "qwen_image.h"
+#include "backend_vulkan.h"
+#include "../assets/pixelina_icon.h"
 
 static const char* field_labels[UI_SETTINGS_COUNT] = {"Seed","Width","Height","Steps","Scheduler shift","Diffuser GGUF","Text encoder GGUF","VAE safetensors"};
 static const char* edit_field_labels[UI_EDIT_SETTINGS_COUNT] = {"Seed","Width","Height","Steps","Reference resolution","Diffuser GGUF","Language encoder GGUF","Vision projector GGUF","VAE safetensors"};
-bool Pixelina::initialize(const std::string &directory, bool png, std::string &error)
+static const char* pane_configuration_keys[UI_SPLITTER_COUNT] = {"left_fraction","prompt_fraction","carousel_fraction"};
+
+static int configuration_integer(const std::map<std::string,std::string> &values, const std::string &key, int fallback)
+{
+    auto entry = values.find(key);
+    if (entry == values.end()) return fallback;
+    char* end;
+    errno = 0;
+    long value = std::strtol(entry->second.c_str(),&end,10);
+    if (end == entry->second.c_str() || *end || errno == ERANGE) return fallback;
+    return int(value);
+}
+
+void Pixelina::restore_configuration(const std::map<std::string,std::string> &values)
+{
+    auto backend = values.find(UI_CONFIG_BACKEND),format = values.find(UI_CONFIG_FORMAT);
+    if (backend != values.end() && (backend->second == PIXELINA_CPU || backend->second == PIXELINA_VULKAN)) settings.backend = backend->second;
+    if (format != values.end() && (format->second == PIXELINA_JPG || format->second == PIXELINA_PNG)) settings.format = format->second;
+    auto_seed = configuration_integer(values,UI_CONFIG_AUTO_SEED,1) == 1;
+    decode_on_the_go = configuration_integer(values,UI_CONFIG_DECODE,0) == 1;
+    global_db = configuration_integer(values,UI_CONFIG_GLOBAL_DB,0) == 1;
+    main_form.image->scaled = configuration_integer(values,UI_CONFIG_SCALED,1) == 1;
+    auto prompt = values.find(UI_CONFIG_PROMPT),browser = values.find(UI_CONFIG_BROWSER_DIRECTORY);
+    if (prompt != values.end()) main_form.prompt->set_text(prompt->second);
+    if (browser != values.end()) PixUIFileBrowser::last_directory = browser->second;
+    width = std::max(UI_MIN_WIDTH,configuration_integer(values,UI_CONFIG_WINDOW_WIDTH,UI_START_WIDTH));
+    height = std::max(UI_MIN_HEIGHT,configuration_integer(values,UI_CONFIG_WINDOW_HEIGHT,UI_START_HEIGHT));
+    float* fractions[] = {&main_form.left_fraction,&main_form.prompt_fraction,&main_form.carousel_fraction};
+    for (size_t i = 0; i < UI_SPLITTER_COUNT; i++) {
+        auto entry = values.find(pane_configuration_keys[i]);
+        float value;
+        if (entry != values.end() && parse_float(entry->second,value) && std::isfinite(value) && value > 0 && value < 1) *fractions[i] = value;
+    }
+}
+
+void Pixelina::save_configuration()
+{
+    PixUIRect normal = canvas.restored_window;
+    if (!(SDL_GetWindowFlags(window) & (SDL_WINDOW_MAXIMIZED | SDL_WINDOW_MINIMIZED))) normal = canvas.window_rect();
+    std::map<std::string,std::string> values = {
+        {UI_CONFIG_BACKEND,settings.backend},
+        {UI_CONFIG_FORMAT,settings.format},
+        {UI_CONFIG_AUTO_SEED,std::to_string(auto_seed)},
+        {UI_CONFIG_DECODE,std::to_string(decode_on_the_go.load())},
+        {UI_CONFIG_SCALED,std::to_string(main_form.image->scaled)},
+        {UI_CONFIG_GLOBAL_DB,std::to_string(global_db)},
+        {UI_CONFIG_PROMPT,main_form.prompt->model.text},
+        {UI_CONFIG_DIRECTORY,workdir},
+        {UI_CONFIG_BROWSER_DIRECTORY,PixUIFileBrowser::last_directory},
+        {UI_CONFIG_TAB,std::to_string(main_form.tabs->selected())},
+        {UI_CONFIG_WINDOW_X,std::to_string(normal.x)},
+        {UI_CONFIG_WINDOW_Y,std::to_string(normal.y)},
+        {UI_CONFIG_WINDOW_WIDTH,std::to_string(normal.w)},
+        {UI_CONFIG_WINDOW_HEIGHT,std::to_string(normal.h)},
+        {UI_CONFIG_MAXIMIZED,std::to_string(canvas.maximized())}
+    };
+    float fractions[] = {main_form.left_fraction,main_form.prompt_fraction,main_form.carousel_fraction};
+    for (size_t i = 0; i < UI_SPLITTER_COUNT; i++) {
+        std::ostringstream value;
+        value << std::setprecision(std::numeric_limits<float>::max_digits10) << fractions[i];
+        values[pane_configuration_keys[i]] = value.str();
+    }
+    for (size_t page = 0; page < UI_SETTINGS_PAGES; page++) {
+        size_t count = page == UI_GENERATE_PAGE? UI_SETTINGS_COUNT : UI_EDIT_SETTINGS_COUNT;
+        for (size_t i = 0; i < count; i++) values[std::string(page == UI_GENERATE_PAGE? UI_CONFIG_GENERATE_PREFIX : UI_CONFIG_EDIT_PREFIX) + std::to_string(i)] = (page == UI_GENERATE_PAGE? main_form.fields[i] : main_form.edit_fields[i])->model.text;
+    }
+    std::string error;
+    if (!config_save(user_directory,values,error)) std::fprintf(stderr,PIXELINA_NAME ": %s\n",error.c_str());
+}
+
+void Pixelina::switch_database()
+{
+    std::vector<PixRecord> loaded;
+    std::string error;
+    if (!database_load(workdir,loaded,error,global_db? std::string{} : path_join(user_directory,PIXELINA_GLOBAL_DB))) {
+        message(error);
+        return;
+    }
+    global_db = !global_db;
+    records.swap(loaded);
+}
+
+bool Pixelina::initialize(const std::string &directory, bool png, std::string &error, bool default_directory, bool use_saved_directory)
 {
     char* cwd = getcwd(nullptr,0);
     if (!cwd) {
@@ -223,12 +118,25 @@ bool Pixelina::initialize(const std::string &directory, bool png, std::string &e
     }
     launch_directory = cwd;
     std::free(cwd);
-    files.last_directory = launch_directory;
+    PixUIFileBrowser::last_directory = launch_directory;
+    const char* home = std::getenv("HOME");
+    if (!home || !home[0]) {
+        error = "Cannot determine the home directory.";
+        return false;
+    }
+    user_directory = path_join(home,PIXELINA_USER_DIRECTORY);
+    if (mkdir(user_directory.c_str(),0700) && errno != EEXIST) {
+        error = "Cannot create configuration directory: " + std::string(std::strerror(errno));
+        return false;
+    }
+    std::map<std::string,std::string> configuration;
+    if (!config_load(user_directory,configuration,error)) return false;
+    restore_configuration(configuration);
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER)) {
         error = SDL_GetError();
         return false;
     }
-    window = SDL_CreateWindow(PIXELINA_NAME,SDL_WINDOWPOS_CENTERED,SDL_WINDOWPOS_CENTERED,width,height,SDL_WINDOW_RESIZABLE | SDL_WINDOW_BORDERLESS);
+    window = SDL_CreateWindow(PIXELINA_NAME,configuration_integer(configuration,UI_CONFIG_WINDOW_X,SDL_WINDOWPOS_CENTERED),configuration_integer(configuration,UI_CONFIG_WINDOW_Y,SDL_WINDOWPOS_CENTERED),width,height,SDL_WINDOW_RESIZABLE | SDL_WINDOW_BORDERLESS | SDL_WINDOW_HIDDEN);
     if (!window) {
         error = SDL_GetError();
         return false;
@@ -236,6 +144,10 @@ bool Pixelina::initialize(const std::string &directory, bool png, std::string &e
     canvas.window = window;
     main_form.bounds = {0,0,width,height};
     SDL_SetWindowMinimumSize(window,UI_MIN_WIDTH,UI_MIN_HEIGHT);
+    canvas.restored_window = canvas.window_rect();
+    // Establish normal geometry and maximize before mapping the window to the desktop.
+    if (configuration_integer(configuration,UI_CONFIG_MAXIMIZED,0) == 1) canvas.window_command(PIXUI_MAXIMIZE,{});
+    SDL_GetWindowSize(window,&width,&height);
     renderer = SDL_CreateRenderer(window,-1,SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
     if (!renderer) renderer = SDL_CreateRenderer(window,-1,SDL_RENDERER_SOFTWARE);
     mutex = SDL_CreateMutex();
@@ -258,12 +170,25 @@ bool Pixelina::initialize(const std::string &directory, bool png, std::string &e
         return false;
     }
     canvas.renderer = renderer;
-    settings.format = png? PIXELINA_PNG : PIXELINA_JPG;
+    if (png) settings.format = PIXELINA_PNG;
     build_gui();
     write_settings();
     write_edit_settings();
-    bool open_file = files.path_kind(directory) == PIXUI_PATH_FILE;
-    if (!open_directory(open_file? launch_directory : directory)) {
+    for (size_t page = 0; page < UI_SETTINGS_PAGES; page++) {
+        size_t count = page == UI_GENERATE_PAGE? UI_SETTINGS_COUNT : UI_EDIT_SETTINGS_COUNT;
+        for (size_t i = 0; i < count; i++) {
+            auto value = configuration.find(std::string(page == UI_GENERATE_PAGE? UI_CONFIG_GENERATE_PREFIX : UI_CONFIG_EDIT_PREFIX) + std::to_string(i));
+            if (value != configuration.end()) (page == UI_GENERATE_PAGE? main_form.fields[i] : main_form.edit_fields[i])->set_text(value->second);
+        }
+    }
+    main_form.tabs->select(size_t(configuration_integer(configuration,UI_CONFIG_TAB,UI_GENERATE_PAGE)));
+    bool open_file = path_kind(directory) == PIX_PATH_FILE;
+    std::string selected_directory = open_file? path_parent(path_normalize(directory)) : directory;
+    auto saved_directory = configuration.find(UI_CONFIG_DIRECTORY);
+    if (default_directory || use_saved_directory) {
+        selected_directory = saved_directory != configuration.end() && !saved_directory->second.empty()? saved_directory->second : launch_directory;
+    }
+    if (!open_directory(selected_directory)) {
         error = dialog_message;
         return false;
     }
@@ -272,7 +197,9 @@ bool Pixelina::initialize(const std::string &directory, bool png, std::string &e
         return false;
     }
     layout();
+    SDL_ShowWindow(window);
     SDL_StartTextInput();
+    initialized = true;
     return true;
 }
 
@@ -280,6 +207,7 @@ Pixelina::~Pixelina()
 {
     stop_requested = true;
     if (worker) SDL_WaitThread(worker,nullptr);
+    if (initialized) save_configuration();
     canvas.release_capture();
     main_form.clear();
     if (current) SDL_DestroyTexture(current);
@@ -302,13 +230,29 @@ bool Pixelina::open_directory(const std::string &directory)
     std::vector<PixDirEntry> listing;
     std::vector<PixRecord> loaded;
     std::string error;
-    if (!directory_list(actual,listing,error) || !database_load(actual,loaded,error)) {
+    if (!directory_list(actual,listing,error) || !database_load(actual,loaded,error,global_db? path_join(user_directory,PIXELINA_GLOBAL_DB) : std::string{})) {
         message(error);
         return false;
     }
     workdir = actual;
     records.swap(loaded);
-    main_form.carousel->items_changed(records.size(),true);
+    images.clear();
+    const char* extensions[] = UI_IMAGE_EXTENSIONS;
+    for (const PixDirEntry &entry : listing) {
+        if (entry.directory) continue;
+        size_t dot = entry.name.rfind('.');
+        if (dot == std::string::npos) continue;
+        std::string extension = entry.name.substr(dot);
+        for (char &ch : extension) {
+            if (ch >= 'A' && ch <= 'Z') ch += 'a' - 'A';
+        }
+        for (const char* supported : extensions) {
+            if (extension != supported) continue;
+            images.push_back(entry.name);
+            break;
+        }
+    }
+    main_form.carousel->items_changed(images.size(),true);
     status = "Workdir: " + workdir;
     return true;
 }
@@ -332,12 +276,17 @@ void Pixelina::layout()
     main_form.preferences->caption = settings.backend + " / " + settings.format;
     main_form.carousel->enabled = !busy;
     main_form.image->set_image(current,image.width,image.height);
-    char speed[UI_STATUS_BUFFER];
-    if (generation_seconds > 0) std::snprintf(speed,sizeof(speed)," | %.2fs (%.3f img/s)",generation_seconds,1.0 / generation_seconds);
-    else std::snprintf(speed,sizeof(speed)," | speed: --");
-    main_form.status->text = std::to_string(records.size()) + " images" + speed + " | " + status;
-    main_form.status->busy = busy;
-    main_form.status->progress = generation_progress;
+    static_cast<PixUIGroupBox*>(main_form.image->parent)->caption = image.width > 0 && image.height > 0? UI_IMAGE_TITLE " (" + std::to_string(image.width) + "x" + std::to_string(image.height) + ")" : UI_IMAGE_TITLE;
+    char timing[UI_STATUS_BUFFER];
+    if (busy && generation_progress > 0 && generation_progress < 1) {
+        double elapsed = double(canvas.ticks() - generation_started) / 1000;
+        double remaining = elapsed * (1 - generation_progress) / generation_progress;
+        uint64_t seconds = uint64_t(remaining);
+        std::snprintf(timing,sizeof(timing),"ETA %llum %02llus",static_cast<unsigned long long>(seconds / 60),static_cast<unsigned long long>(seconds % 60));
+    } else if (busy) std::snprintf(timing,sizeof(timing),generation_progress >= 1? "ETA 0s" : "ETA --");
+    else if (generation_seconds > 0) std::snprintf(timing,sizeof(timing),"%.2fs",generation_seconds);
+    else timing[0] = 0;
+    main_form.status->set_status(status,std::to_string(images.size()) + " images",timing,busy,generation_progress);
     main_form.layout();
 }
 
@@ -443,15 +392,26 @@ bool Pixelina::capture_job()
     candidate.parameters.prompt = main_form.prompt->model.text;
     if (main_form.tabs->selected() == UI_EDIT_PAGE) {
         if (!read_edit_settings()) return false;
-        if (!image_valid(image)) {
-            message("Open, select or generate a complete image before editing.");
-            return false;
-        }
         candidate.parameters.model = PIX_MODEL_QWEN_IMAGE;
         candidate.parameters.edit_settings = edit_settings;
         candidate.edit_settings = edit_settings;
-        candidate.references.push_back(image);
-        if (!image_source_path.empty()) candidate.parameters.references.push_back(image_source_path);
+        if (reference_paths.empty()) {
+            if (image_valid(image)) {
+                candidate.references.push_back(image);
+                if (!image_source_path.empty()) candidate.parameters.references.push_back(image_source_path);
+            }
+        } else {
+            for (const std::string &path : reference_paths) {
+                PixImage reference;
+                std::string error;
+                if (!image_load(path,reference,error) || !image_valid(reference)) {
+                    message(error.empty()? UI_REFERENCE_OPEN_ERROR + path : error);
+                    return false;
+                }
+                candidate.references.push_back(std::move(reference));
+            }
+            candidate.parameters.references = reference_paths;
+        }
         candidate.edit_settings.diffuser = path_join(launch_directory,edit_settings.diffuser);
         candidate.edit_settings.encoder = path_join(launch_directory,edit_settings.encoder);
         candidate.edit_settings.vision = path_join(launch_directory,edit_settings.vision);
@@ -492,10 +452,10 @@ void Pixelina::reference_resolution()
 bool Pixelina::open_image(const std::string &path)
 {
     if (busy) return false;
-    std::string actual = files.normalize(path_join(launch_directory,path));
+    std::string actual = path_normalize(path_join(launch_directory,path));
     PixImage loaded;
     std::string error;
-    if (files.path_kind(actual) != PIXUI_PATH_FILE || !image_load(actual,loaded,error)) {
+    if (path_kind(actual) != PIX_PATH_FILE || !image_load(actual,loaded,error)) {
         message(error.empty()? "Cannot open image: " + actual : error);
         return false;
     }
@@ -513,38 +473,19 @@ bool Pixelina::open_image(const std::string &path)
     image_source_path = actual;
     unsaved = false;
     main_form.carousel->select(-1);
+    edit_settings.width = (image.width + QWEN_IMAGE_MULTIPLE - 1) / QWEN_IMAGE_MULTIPLE * QWEN_IMAGE_MULTIPLE;
+    edit_settings.height = (image.height + QWEN_IMAGE_MULTIPLE - 1) / QWEN_IMAGE_MULTIPLE * QWEN_IMAGE_MULTIPLE;
+    main_form.edit_fields[UI_EDIT_WIDTH]->set_text(std::to_string(edit_settings.width));
+    main_form.edit_fields[UI_EDIT_HEIGHT]->set_text(std::to_string(edit_settings.height));
     reference_resolution();
     status = actual;
-    return true;
-}
-
-void Pixelina::message(const std::string &value)
-{
-    dialog_message = value;
-    main_form.present(std::make_unique<PixUIMessageDialog>(canvas,value,PIXELINA_NAME));
-}
-
-bool Pixelina::select_image(size_t index)
-{
-    if (index >= records.size() || busy) return false;
-    PixImage loaded;
-    std::string error;
-    if (!image_load(path_join(workdir,records[index].filename),loaded,error)) {
-        message(error);
-        return false;
-    }
-    SDL_Texture* texture = SDL_CreateTexture(renderer,SDL_PIXELFORMAT_RGB24,SDL_TEXTUREACCESS_STATIC,loaded.width,loaded.height);
-    if (!texture || SDL_UpdateTexture(texture,nullptr,loaded.rgb.data(),loaded.width * 3)) {
-        if (texture) SDL_DestroyTexture(texture);
-        message(SDL_GetError());
-        return false;
-    }
-    if (current) SDL_DestroyTexture(current);
-    current = texture;
-    image = std::move(loaded);
-    image_record = records[index];
+    auto selected = std::find_if(images.begin(),images.end(),[&](const std::string &filename) { return path_normalize(path_join(workdir,filename)) == actual; });
+    if (selected == images.end()) return true;
+    main_form.carousel->select(int(selected - images.begin()));
+    auto record = std::find_if(records.begin(),records.end(),[&](const PixRecord &value) { return path_join(workdir,value.filename) == actual; });
+    if (record == records.end()) return true;
+    image_record = *record;
     image_has_record = true;
-    image_source_path = files.normalize(path_join(workdir,image_record.filename));
     main_form.tabs->select(image_record.model == PIX_MODEL_Z_IMAGE? UI_GENERATE_PAGE : UI_EDIT_PAGE);
     if (image_record.model == PIX_MODEL_Z_IMAGE) {
         settings = image_record.settings;
@@ -556,10 +497,20 @@ bool Pixelina::select_image(size_t index)
         write_edit_settings();
     }
     main_form.prompt->set_text(image_record.prompt);
-    reference_resolution();
-    unsaved = false;
-    status = records[index].filename;
+    status = *selected;
     return true;
+}
+
+void Pixelina::message(const std::string &value)
+{
+    dialog_message = value;
+    main_form.present(std::make_unique<PixUIMessageDialog>(canvas,value,PIXELINA_NAME));
+}
+
+bool Pixelina::select_image(size_t index)
+{
+    if (index >= images.size() || busy) return false;
+    return open_image(path_join(workdir,images[index]));
 }
 
 void Pixelina::save_image()
@@ -577,15 +528,18 @@ void Pixelina::save_image()
     if (record.model == PIX_MODEL_Z_IMAGE) record.settings.format = settings.format;
     else record.edit_settings.format = settings.format;
     std::string error;
-    if (!storage_save(workdir,record,image,error)) {
+    if (!storage_save(workdir,record,image,error,global_db? path_join(user_directory,PIXELINA_GLOBAL_DB) : std::string{})) {
         message(error);
         return;
     }
     image_record = record;
-    image_source_path = files.normalize(path_join(workdir,record.filename));
+    image_source_path = path_normalize(path_join(workdir,record.filename));
     records.push_back(record);
-    main_form.carousel->items_changed(records.size());
-    main_form.carousel->select(int(records.size()) - 1);
+    std::string filename = image_source_path.substr(image_source_path.rfind('/') + 1);
+    images.push_back(filename);
+    std::sort(images.begin(),images.end());
+    main_form.carousel->items_changed(images.size());
+    main_form.carousel->select(int(std::find(images.begin(),images.end(),filename) - images.begin()));
     unsaved = false;
     status = "Saved " + record.filename;
 }
@@ -595,6 +549,7 @@ void Pixelina::export_image(const std::string &destination)
     std::string error;
     if (!image_save(destination,image,error)) message(error);
     else {
+        image_source_path = path_normalize(destination);
         main_form.dismiss_dialog();
         status = "Exported " + destination;
     }
@@ -696,8 +651,37 @@ void Pixelina::action(int command)
         auto_seed = !auto_seed;
         return;
     }
+    if (command == CMD_GLOBAL_DB) {
+        switch_database();
+        return;
+    }
     if (busy) return;
     switch (command) {
+    case CMD_CHAT: {
+        if (!image_valid(image)) {
+            message("Open or generate an image before starting a chat.");
+            return;
+        }
+        uint64_t resolution;
+        if (!parse_unsigned(main_form.edit_fields[UI_EDIT_RESOLUTION]->model.text,resolution) || !resolution || resolution > INT32_MAX || resolution * resolution > PIXELINA_MAX_PIXELS) {
+            message("Enter a valid reference resolution on the Edit page.");
+            return;
+        }
+        PixEditSettings chat;
+        chat.encoder = main_form.edit_fields[UI_EDIT_ENCODER]->model.text;
+        chat.vision = main_form.edit_fields[UI_EDIT_VISION]->model.text;
+        chat.reference_resolution = int(resolution);
+        chat.backend = settings.backend;
+        if (chat.encoder.empty() || chat.vision.empty()) {
+            message("Select the Qwen-VL language model and mmproj on the Edit page.");
+            return;
+        }
+        chat.encoder = path_join(launch_directory,chat.encoder);
+        chat.vision = path_join(launch_directory,chat.vision);
+        std::string name = image_source_path.empty()? "Unsaved image" : image_source_path.substr(image_source_path.find_last_of('/') + 1);
+        main_form.present(std::make_unique<PixelinaChatDialog>(canvas,name,chat,image));
+        break;
+    }
     case CMD_CLEAR:
         if (current) SDL_DestroyTexture(current);
         current = nullptr;
@@ -708,6 +692,7 @@ void Pixelina::action(int command)
         worker_preview = PixImage();
         image_has_record = false;
         image_source_path.clear();
+        reference_paths.clear();
         unsaved = false;
         generation_progress = 0;
         generation_seconds = 0;
@@ -715,8 +700,22 @@ void Pixelina::action(int command)
         main_form.carousel->select(-1);
         status = UI_READY_TEXT;
         break;
+    case CMD_MULTI_REFERENCE: {
+        std::vector<std::string> paths = reference_paths;
+        if (paths.empty() && image_valid(image) && !image_source_path.empty()) paths.push_back(image_source_path);
+        auto dialog = std::make_unique<PixelinaReferenceDialog>(canvas,paths,main_form.prompt->model.text);
+        dialog->load = [this](const std::string &path) {
+            return load_thumbnail(path);
+        };
+        dialog->selected = [this](const std::vector<std::string> &paths, const std::string &prompt) {
+            reference_paths = paths;
+            main_form.prompt->set_text(prompt);
+        };
+        main_form.present(std::move(dialog));
+        break;
+    }
     case CMD_OPEN: {
-        auto browser = std::make_unique<PixUIFileBrowser>(canvas,files);
+        auto browser = std::make_unique<PixUIFileBrowser>(canvas);
         browser->dir_selector = true;
         browser->title = "Open directory";
         browser->error = [this](const std::string &error) { status = error; };
@@ -726,7 +725,7 @@ void Pixelina::action(int command)
         break;
     }
     case CMD_OPEN_IMAGE: {
-        auto browser = std::make_unique<PixUIFileBrowser>(canvas,files);
+        auto browser = std::make_unique<PixUIFileBrowser>(canvas);
         browser->title = "Open image";
         browser->error = [this](const std::string &error) { status = error; };
         browser->selected = [this](const std::string &path) { return open_image(path); };
@@ -740,7 +739,7 @@ void Pixelina::action(int command)
     case CMD_SAVE_AS:
         if (image.rgb.empty()) message("Generate or select an image first.");
         else {
-            auto browser = std::make_unique<PixUIFileBrowser>(canvas,files,path_join(files.last_directory,settings.format == PIXELINA_PNG? "image.png" : "image.jpg"));
+            auto browser = std::make_unique<PixUIFileBrowser>(canvas,path_join(PixUIFileBrowser::last_directory,settings.format == PIXELINA_PNG? "image.png" : "image.jpg"));
             browser->title = UI_SAVE_AS_TEXT;
             browser->accept_caption = UI_SAVE_TEXT;
             browser->path_label = "Destination (.jpg or .png):";
@@ -748,7 +747,7 @@ void Pixelina::action(int command)
             browser->show_listing = false;
             browser->selected = [this](const std::string &path) {
                 std::string destination = path_join(workdir,path);
-                if (files.path_kind(destination) != PIXUI_PATH_MISSING) {
+                if (path_kind(destination) != PIX_PATH_MISSING) {
                     auto confirmation = std::make_unique<PixUIMessageDialog>(canvas,"Overwrite existing file?\n" + destination,PIXELINA_NAME,"Overwrite",UI_CANCEL_TEXT);
                     confirmation->accepted = [this,destination]() { export_image(destination); };
                     main_form.present(std::move(confirmation));
@@ -783,6 +782,7 @@ void Pixelina::action(int command)
         worker_message.clear();
         worker_preview = PixImage();
         busy = true;
+        generation_started = canvas.ticks();
         status = "Generating";
         worker = SDL_CreateThread(generation_worker,PIXELINA_NAME " generation",this);
         if (!worker) {
@@ -796,12 +796,12 @@ void Pixelina::action(int command)
     }
 }
 
-PixUIThumbCache Pixelina::load_thumbnail(size_t index)
+PixUIThumbCache Pixelina::load_thumbnail(const std::string &path)
 {
     PixUIThumbCache value;
     PixImage full;
     std::string error;
-    if (image_load(path_join(workdir,records[index].filename),full,error)) {
+    if (image_load(path,full,error)) {
         PixImage reduced = image_thumbnail(full);
         value.width = reduced.width;
         value.height = reduced.height;
@@ -833,6 +833,9 @@ void Pixelina::build_menus()
     file->add("Quit",[this]() { action(CMD_QUIT); })->bind_shortcut('q',PIXUI_CTRL,"Ctrl+Q");
     PixUIMenu* edit = popups[1];
     edit->add("Clear",[this]() { action(CMD_CLEAR); });
+    edit->add("Multi-Reference...")->activate = [this]() {
+        action(CMD_MULTI_REFERENCE);
+    };
     PixUIMenuItem* generate = edit->add(UI_GENERATE_TEXT,[this]() { action(CMD_GENERATE); });
     generate->bind_shortcut(PIXUI_F5,0,"F5");
     generate->caption_state = [this]() { return busy? UI_STOP_TEXT : UI_GENERATE_TEXT; };
@@ -840,6 +843,9 @@ void Pixelina::build_menus()
     PixUIMenuItem* seed = preferences->add("Auto-seed",[this]() { action(CMD_AUTO_SEED); });
     seed->checkable = true;
     seed->checked_state = [this]() { return auto_seed; };
+    PixUIMenuItem* database = preferences->add("Use global DB",[this]() { action(CMD_GLOBAL_DB); });
+    database->checkable = true;
+    database->checked_state = [this]() { return global_db; };
     PixUIMenu* format = preferences->child(*preferences->add("File format"));
     PixUIMenuItem* jpg = format->add(PIXELINA_JPG,[this]() { action(CMD_JPG); });
     jpg->checkable = true;
@@ -863,6 +869,8 @@ void Pixelina::build_menus()
     PixUIMenuItem* decode = popups[2]->add("Decode on-the-go",[this]() { action(CMD_DECODE); });
     decode->checkable = true;
     decode->checked_state = [this]() { return decode_on_the_go.load(); };
+    PixUIMenuItem* chat = popups[2]->add("Chat",[this]() { action(CMD_CHAT); });
+    chat->enabled_state = [this]() { return !busy && image_valid(image); };
     popups[3]->add(UI_ABOUT_PREFIX PIXELINA_NAME,[this]() { action(CMD_ABOUT); });
     main_form.add_system_menu();
 }
@@ -872,8 +880,10 @@ void Pixelina::build_gui()
     main_form.close = [this]() { running = false; };
     build_menus();
     main_form.generate->activate = [this]() { action(CMD_GENERATE); };
-    main_form.carousel->caption = [this](size_t index) { return records[index].filename; };
-    main_form.carousel->load = [this](size_t index) { return load_thumbnail(index); };
+    main_form.carousel->caption = [this](size_t index) { return images[index]; };
+    main_form.carousel->load = [this](size_t index) {
+        return load_thumbnail(path_join(workdir,images[index]));
+    };
     main_form.carousel->release = [](void* texture) { SDL_DestroyTexture(static_cast<SDL_Texture*>(texture)); };
     main_form.carousel->cache_limit = PIXELINA_THUMB_CACHE;
     main_form.carousel->selected = [this](size_t index) { return select_image(index); };
@@ -887,11 +897,11 @@ void Pixelina::build_gui()
             PixUIButton* button = page == UI_GENERATE_PAGE? main_form.browse[i] : main_form.edit_browse[i];
             button->activate = [this,field]() {
                 if (busy) return;
-                auto browser = std::make_unique<PixUIFileBrowser>(canvas,files);
+                auto browser = std::make_unique<PixUIFileBrowser>(canvas);
                 browser->title = "Open model file";
                 browser->error = [this](const std::string &error) { status = error; };
                 browser->selected = [this,field](const std::string &path) {
-                    if (files.path_kind(path) != PIXUI_PATH_FILE) {
+                    if (path_kind(path) != PIX_PATH_FILE) {
                         status = "Cannot open file: " + path;
                         return false;
                     }
@@ -926,23 +936,44 @@ void Pixelina::event(const SDL_Event &native)
     }
     PixUIEvent input = canvas.translate(native);
     canvas.event(main_form,input);
+    SDL_CaptureMouse(canvas.captured? SDL_TRUE : SDL_FALSE);
     layout();
 }
 
 void Pixelina::window_event(const SDL_Event &input)
 {
+    if (!(SDL_GetWindowFlags(window) & (SDL_WINDOW_MAXIMIZED | SDL_WINDOW_MINIMIZED))) {
+        switch (input.window.event) {
+        case SDL_WINDOWEVENT_MOVED:
+        case SDL_WINDOWEVENT_SIZE_CHANGED:
+            // Queued events can describe geometry from before a maximize or restore.
+            canvas.restored_window = canvas.window_rect();
+            break;
+        default:
+            break;
+        }
+    }
     switch (input.window.event) {
     case SDL_WINDOWEVENT_FOCUS_GAINED:
+        main_form.repaint = true;
         main_form.active = true;
         break;
     case SDL_WINDOWEVENT_FOCUS_LOST:
         canvas.release_capture();
+        SDL_CaptureMouse(SDL_FALSE);
+        main_form.repaint = true;
         main_form.active = false;
         break;
     case SDL_WINDOWEVENT_SIZE_CHANGED:
+        main_form.repaint = true;
         width = input.window.data1;
         height = input.window.data2;
         layout();
+        break;
+    case SDL_WINDOWEVENT_EXPOSED:
+    case SDL_WINDOWEVENT_RESTORED:
+    case SDL_WINDOWEVENT_MAXIMIZED:
+        main_form.repaint = true;
         break;
     default:
         break;
@@ -969,14 +1000,19 @@ void Pixelina::generation_image(PixImage completed)
 
 int Pixelina::run()
 {
+    uint64_t timing_second = 0;
     while (running) {
         SDL_Event input;
         while (SDL_PollEvent(&input)) event(input);
         if (busy) {
             SDL_LockMutex(mutex);
             bool done = worker_done;
+            std::string stage = stop_requested? UI_STOPPING_TEXT : worker_stage;
+            uint64_t second = canvas.ticks() / 1000;
+            bool changed = generation_progress != worker_progress || status != stage || second != timing_second;
             generation_progress = worker_progress;
-            status = stop_requested? UI_STOPPING_TEXT : worker_stage;
+            status = stage;
+            timing_second = second;
             std::string error = done? worker_message : "";
             PixImage completed;
             PixImage preview = std::move(worker_preview);
@@ -985,7 +1021,10 @@ int Pixelina::run()
                 generation_seconds = worker_seconds;
             }
             SDL_UnlockMutex(mutex);
-            if (!preview.rgb.empty()) generation_image(std::move(preview));
+            if (!preview.rgb.empty()) {
+                generation_image(std::move(preview));
+                changed = true;
+            }
             if (done) {
                 SDL_WaitThread(worker,nullptr);
                 worker = nullptr;
@@ -998,50 +1037,12 @@ int Pixelina::run()
                     status = "Generated image (unsaved)";
                 }
             }
+            if (changed || done) layout();
         }
-        layout();
-        paint();
+        if (main_form.needs_repaint()) paint();
         SDL_Delay(UI_FRAME_DELAY);
     }
     return 0;
-}
-
-bool PixUISystemFiles::read_directory(const std::string &path, std::vector<PixUIFileEntry> &entries, std::string &error)
-{
-    std::vector<PixDirEntry> listing;
-    bool result = directory_list(path,listing,error);
-    entries.clear();
-    for (const auto &entry : listing) entries.push_back({entry.name,entry.directory});
-    return result;
-}
-
-std::string PixUISystemFiles::normalize(const std::string &path)
-{
-    char* canonical = realpath(path.c_str(),nullptr);
-    if (!canonical) return path;
-    std::string result = canonical;
-    std::free(canonical);
-    return result;
-}
-
-PixUIPathKind PixUISystemFiles::path_kind(const std::string &path)
-{
-    struct stat info;
-    if (stat(path.c_str(),&info)) return PIXUI_PATH_MISSING;
-    if (S_ISDIR(info.st_mode)) return PIXUI_PATH_DIRECTORY;
-    if (S_ISREG(info.st_mode)) return PIXUI_PATH_FILE;
-    return PIXUI_PATH_OTHER;
-}
-
-std::string PixUISystemFiles::join_path(const std::string &directory, const std::string &name)
-{
-    return path_join(directory,name);
-}
-
-std::string PixUISystemFiles::parent_path(const std::string &path)
-{
-    size_t slash = path.rfind('/');
-    return slash == std::string::npos? "." : path.substr(0,slash + 1);
 }
 
 PixelinaForm::PixelinaForm(PixUICanvas &context) : PixUIForm(context)
@@ -1050,7 +1051,7 @@ PixelinaForm::PixelinaForm(PixUICanvas &context) : PixUIForm(context)
     menu_background = add<PixUIPanel>();
     menu_background->color = COLOR_LIGHT;
     menu_background->border = false;
-    const char* headings[] = {"Prompt","Settings","Saved images","Image"};
+    const char* headings[] = {"Prompt","Settings","Saved images",UI_IMAGE_TITLE};
     for (int i = 0; i < UI_GROUP_COUNT; i++) {
         if (i == UI_SETTINGS_GROUP) {
             tabs = add<PixTab>();
@@ -1112,7 +1113,6 @@ PixelinaForm::PixelinaForm(PixUICanvas &context) : PixUIForm(context)
     status = add<PixUIStatusBar>();
     status->progress_width = UI_STATUS_PROGRESS_WIDTH;
     status->progress_offset = UI_STATUS_PROGRESS_OFFSET;
-    status->text_space = UI_STATUS_TEXT_SPACE;
     status->progress_top = UI_STATUS_PROGRESS_TOP;
     for (int i = 0; i < UI_SPLITTER_COUNT; i++) {
         splitters[i] = add<PixUISplitter>();
@@ -1151,9 +1151,4 @@ void PixelinaForm::layout()
     splitters[UI_SPLIT_PROMPT]->bounds = {groups[UI_PROMPT_GROUP]->bounds.x,groups[UI_PROMPT_GROUP]->bounds.y + groups[UI_PROMPT_GROUP]->bounds.h,groups[UI_PROMPT_GROUP]->bounds.w,UI_SPLITTER_WIDTH};
     splitters[UI_SPLIT_CAROUSEL]->bounds = {groups[UI_CAROUSEL_GROUP]->bounds.x,groups[UI_CAROUSEL_GROUP]->bounds.y + groups[UI_CAROUSEL_GROUP]->bounds.h,groups[UI_CAROUSEL_GROUP]->bounds.w,UI_SPLITTER_WIDTH};
     PixUIForm::layout();
-}
-
-void PixUISDLCanvas::window_title(const std::string &title)
-{
-    SDL_SetWindowTitle(window,title.c_str());
 }

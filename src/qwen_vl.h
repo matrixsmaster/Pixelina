@@ -69,6 +69,7 @@
 #define QWEN_VL_SYSTEM "<|im_start|>system\nComprehend and analyze the provided prompt.<|im_end|>\n"
 #define QWEN_VL_USER "<|im_start|>user\n"
 #define QWEN_VL_IMAGE_PAD "<|image_pad|>"
+#define QWEN_VL_REFERENCE_PREFIX "<image"
 #define QWEN_VL_VISION_START_TEXT "<|vision_start|>"
 #define QWEN_VL_VISION_END_TEXT "<|vision_end|>"
 #define QWEN_VL_EPSILON 0.000001f
@@ -103,9 +104,19 @@ struct PixQwenCondition {
     std::vector<unsigned char> image_slots; // matching reference-image slot flags
 };
 
+struct PixVLCacheLayer {
+    PixTensor key,value; // incrementally populated normalized/rotated keys and projected values
+};
+
+struct PixVLCache {
+    std::array<PixVLCacheLayer,QWEN_VL_LAYERS> layers; // capacity-sized per-layer buffers
+    size_t rows = 0,capacity = 0; // populated prefix and admitted row capacity
+};
+
 bool qwen_vl_validate(const PixModelFile &language, const PixModelFile &vision, std::string &error);
 PixVLInput qwen_vl_prepare(const PixTokenz &tokenizer, const std::string &prompt, const std::vector<PixImage> &images, bool pack_pixels = true);
 PixVisionFeatures qwen_vl_vision(const PixModelFile &vision, const PixVLInput &input, const InferenceProgress &progress);
 PixQwenCondition qwen_vl_language(const PixModelFile &language, const PixVLInput &input, PixVisionFeatures features, const InferenceProgress &progress);
+PixTensor qwen_vl_forward(const PixModelFile &language, const PixVLInput &input, PixVisionFeatures features, const InferenceProgress &progress, PixVLCache* cache = nullptr);
 
 #endif

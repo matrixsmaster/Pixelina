@@ -17,21 +17,23 @@ int main(int argc, char** argv)
     std::string directory = ".";
     bool png = false;
     bool has_path = false;
+    bool default_directory = false;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i],"-p")) png = true;
+        else if (!strcmp(argv[i],"-d")) default_directory = true;
         else if (!strcmp(argv[i],"-t") && i + 1 < argc) cpu_set_threads(atoi(argv[++i]));
         else if (argv[i][0] != '-' && !has_path) {
             directory = argv[i];
             has_path = true;
         } else {
-            fprintf(stderr,"Usage: pixelina [-p] [-t threads] [path]\nUnknown or incomplete argument: %s\n",argv[i]);
+            fprintf(stderr,"Usage: pixelina [-d] [-p] [-t threads] [path]\nUnknown or incomplete argument: %s\n",argv[i]);
             return 1;
         }
     }
 
     Pixelina app;
     std::string error;
-    if (!app.initialize(directory,png,error)) {
+    if (!app.initialize(directory,png,error,default_directory,!has_path)) {
         fprintf(stderr,PIXELINA_NAME ": %s\n",error.c_str());
         return 1;
     }

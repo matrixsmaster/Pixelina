@@ -13,6 +13,7 @@
 #include <cstring>
 #include <unistd.h>
 #include "storage.h"
+#include "image.h"
 
 #define STB_IMAGE_IMPLEMENTATION
 #define STB_IMAGE_WRITE_IMPLEMENTATION
@@ -88,17 +89,8 @@ bool image_save(const std::string &path, const PixImage &image, std::string &err
         error = "Save as requires a .png, .jpg or .jpeg extension.";
         return false;
     }
-    size_t slash = path.find_last_of('/');
-    std::string temporary = (slash == std::string::npos? "" : path.substr(0,slash + 1)) + IMAGE_TEMP_SUFFIX;
-    std::vector<char> temp_name(temporary.begin(),temporary.end());
-    temp_name.push_back(0);
-    int fd = mkstemp(temp_name.data());
-    FILE* file = fd < 0? nullptr : fdopen(fd,"wb");
+    FILE* file = std::fopen(path.c_str(),"wb");
     if (!file) {
-        if (fd >= 0) {
-            close(fd);
-            unlink(temp_name.data());
-        }
         error = "Cannot write image: " + path;
         return false;
     }
@@ -125,9 +117,7 @@ bool image_save(const std::string &path, const PixImage &image, std::string &err
     if (std::fflush(file)) failed = true;
     if (fsync(fileno(file))) failed = true;
     if (std::fclose(file)) failed = true;
-    if (result && !failed && rename(temp_name.data(),path.c_str())) failed = true;
     if (!result || failed) {
-        unlink(temp_name.data());
         if (error.empty()) error = "Image write failed: " + path;
         return false;
     }
@@ -171,7 +161,7 @@ static double image_filter(double distance, PixImageFilter filter)
     case PIX_IMAGE_LANCZOS:
         if (!x) return 1;
         if (x >= IMAGE_LANCZOS_RADIUS) return 0;
-        return std::sin(IMAGE_PI * x) * std::sin(IMAGE_PI * x / IMAGE_LANCZOS_RADIUS) / (IMAGE_PI * IMAGE_PI * x * x / IMAGE_LANCZOS_RADIUS);
+        return std::sin(M_PI * x) * std::sin(M_PI * x / IMAGE_LANCZOS_RADIUS) / (M_PI * M_PI * x * x / IMAGE_LANCZOS_RADIUS);
     }
     return 0;
 }

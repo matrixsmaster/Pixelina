@@ -11,7 +11,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <dirent.h>
 #include <fcntl.h>
 #include <iomanip>
 #include <limits>
@@ -22,14 +21,11 @@
 
 bool parse_unsigned(const std::string &text, uint64_t &value)
 {
-    if (text.empty()) return false;
-    value = 0;
-    for (char ch : text) {
-        if (ch < '0' || ch > '9') return false;
-        unsigned digit = ch - '0';
-        if (value > (UINT64_MAX - digit) / 10) return false;
-        value = value * 10 + digit;
-    }
+    char* end;
+    errno = 0;
+    unsigned long long parsed = std::strtoull(text.c_str(),&end,0);
+    if (end != text.c_str() + text.size() || errno == ERANGE) return false;
+    value = parsed;
     return true;
 }
 
@@ -66,8 +62,8 @@ bool edit_settings_valid(const PixEditSettings &settings, std::string &error)
         error = "Image dimensions exceed the supported memory bound.";
         return false;
     }
-    if (settings.steps < 2 || settings.steps > QWEN_IMAGE_MAX_STEPS) {
-        error = "Edit steps must be between 2 and " + std::to_string(QWEN_IMAGE_MAX_STEPS) + " for the terminal-stretched schedule.";
+    if (settings.steps < 2 || settings.steps > PIXELINA_EDIT_MAX_STEPS) {
+        error = "Edit steps must be between 2 and " + std::to_string(PIXELINA_EDIT_MAX_STEPS) + " for the terminal-stretched schedule.";
         return false;
     }
     if (settings.reference_resolution <= 0 || uint64_t(settings.reference_resolution) * settings.reference_resolution > PIXELINA_MAX_PIXELS) {
@@ -97,25 +93,18 @@ bool image_valid(const PixImage &image)
     return image.rgb.size() == size_t(pixels) * 3 && (image.alpha.empty() || image.alpha.size() == size_t(pixels));
 }
 
-std::string path_join(const std::string &directory, const std::string &name)
-{
-    if (!name.empty() && name[0] == '/') return name;
-    if (directory.empty() || directory.back() == '/') return directory + name;
-    return directory + "/" + name;
-}
-
 std::string database_record(const PixRecord &record)
 {
     std::ostringstream out;
     switch (record.model) {
     case PIX_MODEL_Z_IMAGE: {
         const PixSettings &s = record.settings;
-        out << PIXELINA_VERSION << s.seed << ';' << s.width << ';' << s.height << ';' << s.steps << ';' << std::setprecision(std::numeric_limits<float>::max_digits10) << s.shift << ';' << s.diffuser << ';' << s.encoder << ';' << s.vae << ';' << s.backend << ';' << s.format << ';' << record.filename << ';';
+        out << PIXELINA_LOG_GEN_VERSION << s.seed << ';' << s.width << ';' << s.height << ';' << s.steps << ';' << std::setprecision(std::numeric_limits<float>::max_digits10) << s.shift << ';' << s.diffuser << ';' << s.encoder << ';' << s.vae << ';' << s.backend << ';' << s.format << ';' << record.filename << ';';
         break;
     }
     case PIX_MODEL_QWEN_IMAGE: {
         const PixEditSettings &s = record.edit_settings;
-        out << PIXELINA_EDIT_VERSION << s.seed << ';' << s.width << ';' << s.height << ';' << s.steps << ';' << s.reference_resolution << ';' << s.diffuser << ';' << s.encoder << ';' << s.vision << ';' << s.vae << ';' << s.backend << ';' << s.format << ';' << record.filename << ';' << record.references.size() << ';';
+        out << PIXELINA_LOG_EDIT_VERSION << s.seed << ';' << s.width << ';' << s.height << ';' << s.steps << ';' << s.reference_resolution << ';' << s.diffuser << ';' << s.encoder << ';' << s.vision << ';' << s.vae << ';' << s.backend << ';' << s.format << ';' << record.filename << ';' << record.references.size() << ';';
         for (const std::string &path : record.references) out << path << ';';
         break;
     }
@@ -133,13 +122,13 @@ bool database_parse(const std::string &text, std::vector<PixRecord> &records, st
     while (start < text.size()) {
         PixRecord record;
         size_t count = 0,cursor = start;
-        if (!text.compare(start,std::strlen(PIXELINA_VERSION),PIXELINA_VERSION)) {
-            count = PIXELINA_RECORD_FIELDS;
-            cursor += std::strlen(PIXELINA_VERSION);
-        } else if (!text.compare(start,std::strlen(PIXELINA_EDIT_VERSION),PIXELINA_EDIT_VERSION)) {
+        if (!text.compare(start,std::strlen(PIXELINA_LOG_GEN_VERSION),PIXELINA_LOG_GEN_VERSION)) {
+            count = PIXELINA_LOG_GEN_FIELDS;
+            cursor += std::strlen(PIXELINA_LOG_GEN_VERSION);
+        } else if (!text.compare(start,std::strlen(PIXELINA_LOG_EDIT_VERSION),PIXELINA_LOG_EDIT_VERSION)) {
             record.model = PIX_MODEL_QWEN_IMAGE;
-            count = PIXELINA_EDIT_RECORD_FIELDS;
-            cursor += std::strlen(PIXELINA_EDIT_VERSION);
+            count = PIXELINA_LOG_EDIT_FIELDS;
+            cursor += std::strlen(PIXELINA_LOG_EDIT_VERSION);
         } else {
             error = "Malformed database record or unsupported log version at byte " + std::to_string(start) + ".";
             return false;
@@ -239,9 +228,82 @@ bool database_parse(const std::string &text, std::vector<PixRecord> &records, st
     return true;
 }
 
-bool database_load(const std::string &directory, std::vector<PixRecord> &records, std::string &error)
+static bool storage_write(const std::string &path, const std::string &text, std::string &error)
 {
-    std::string path = path_join(directory,PIXELINA_DB);
+    std::string temporary = path_join(path.substr(0,path.rfind('/') + 1),PIXELINA_TEMP_PATTERN);
+    std::vector<char> writable(temporary.begin(),temporary.end());
+    writable.push_back(0);
+    int fd = mkstemp(writable.data());
+    bool ok = fd >= 0;
+    if (ok) {
+        size_t offset = 0;
+        while (offset < text.size()) {
+            ssize_t written = write(fd,text.data() + offset,text.size() - offset);
+            if (written < 0 && errno == EINTR) continue;
+            if (written <= 0) {
+                ok = false;
+                break;
+            }
+            offset += size_t(written);
+        }
+        if (fsync(fd)) ok = false;
+        if (close(fd)) ok = false;
+    }
+    if (ok && rename(writable.data(),path.c_str())) ok = false;
+    if (!ok) {
+        if (fd >= 0) unlink(writable.data());
+        error = "Cannot replace storage file: " + path;
+        return false;
+    }
+    return true;
+}
+
+bool config_load(const std::string &directory, std::map<std::string,std::string> &values, std::string &error)
+{
+    std::string path = path_join(directory,PIXELINA_CONFIG);
+    FILE* file = std::fopen(path.c_str(),"rb");
+    if (!file) {
+        if (errno == ENOENT) {
+            values.clear();
+            return true;
+        }
+        error = "Cannot read configuration: " + std::string(std::strerror(errno));
+        return false;
+    }
+    std::string text;
+    char buffer[BUFSIZ];
+    size_t count;
+    while ((count = std::fread(buffer,1,sizeof(buffer),file))) text.append(buffer,count);
+    bool failed = std::ferror(file);
+    std::fclose(file);
+    std::istringstream input(text);
+    std::map<std::string,std::string> parsed;
+    while (input >> std::ws && !input.eof()) {
+        std::string key,value;
+        input >> key >> std::ws;
+        if (input.peek() != '"' || !(input >> std::quoted(value)) || !parsed.emplace(key,value).second) {
+            failed = true;
+            break;
+        }
+    }
+    if (failed) {
+        error = "Invalid or unreadable configuration: " + path;
+        return false;
+    }
+    values.swap(parsed);
+    return true;
+}
+
+bool config_save(const std::string &directory, const std::map<std::string,std::string> &values, std::string &error)
+{
+    std::ostringstream output;
+    for (const auto &value : values) output << value.first << ' ' << std::quoted(value.second) << '\n';
+    return storage_write(path_join(directory,PIXELINA_CONFIG),output.str(),error);
+}
+
+bool database_load(const std::string &directory, std::vector<PixRecord> &records, std::string &error, const std::string &database)
+{
+    std::string path = database.empty()? path_join(directory,PIXELINA_DB) : database;
     FILE* file = std::fopen(path.c_str(),"rb");
     if (!file) {
         if (errno == ENOENT) {
@@ -264,35 +326,36 @@ bool database_load(const std::string &directory, std::vector<PixRecord> &records
     return database_parse(text,records,error);
 }
 
-bool storage_save(const std::string &directory, PixRecord &record, const PixImage &image, std::string &error)
+bool storage_save(const std::string &directory, PixRecord &record, const PixImage &image, std::string &error, const std::string &database)
 {
     std::vector<PixRecord> existing;
-    if (!database_load(directory,existing,error)) return false;
+    if (!database_load(directory,existing,error,database)) return false;
+    char* canonical = realpath(directory.c_str(),nullptr);
+    if (!canonical) {
+        error = "Cannot resolve output directory: " + std::string(std::strerror(errno));
+        return false;
+    }
+
+    std::string output_directory = canonical;
+    std::free(canonical);
     std::string filename,path;
-    bool reserved = false;
+    bool found = false;
     for (unsigned i = 1; i <= PIXELINA_MAX_IMAGE_NUMBER; i++) {
         char stem[32];
         std::snprintf(stem,sizeof(stem),"p%05u",i);
         bool used = false;
         for (const PixRecord &old : existing) {
-            if (old.filename == std::string(stem) + PIXELINA_EXT_JPG || old.filename == std::string(stem) + PIXELINA_EXT_PNG) used = true;
+            if (path_join(output_directory,old.filename) == path_join(output_directory,std::string(stem) + PIXELINA_EXT_JPG) || path_join(output_directory,old.filename) == path_join(output_directory,std::string(stem) + PIXELINA_EXT_PNG)) used = true;
         }
         struct stat info;
         if (!stat(path_join(directory,std::string(stem) + PIXELINA_EXT_JPG).c_str(),&info) || !stat(path_join(directory,std::string(stem) + PIXELINA_EXT_PNG).c_str(),&info)) used = true;
         if (used) continue;
         filename = std::string(stem) + ((record.model == PIX_MODEL_QWEN_IMAGE? record.edit_settings.format : record.settings.format) == PIXELINA_PNG? PIXELINA_EXT_PNG : PIXELINA_EXT_JPG);
-        path = path_join(directory,filename);
-        int fd = open(path.c_str(),O_WRONLY | O_CREAT | O_EXCL,0666);
-        if (fd < 0) {
-            if (errno == EEXIST) continue;
-            error = "Cannot reserve output image: " + std::string(std::strerror(errno));
-            return false;
-        }
-        close(fd);
-        reserved = true;
+        path = path_join(output_directory,filename);
+        found = true;
         break;
     }
-    if (!reserved) {
+    if (!found) {
         error = "All sequential image numbers are occupied.";
         return false;
     }
@@ -300,57 +363,14 @@ bool storage_save(const std::string &directory, PixRecord &record, const PixImag
         unlink(path.c_str());
         return false;
     }
+
     PixRecord saved = record;
-    saved.filename = filename;
+    saved.filename = database.empty()? filename : path;
     existing.push_back(saved);
     std::string log;
     for (const PixRecord &entry : existing) log += database_record(entry);
-    std::string temporary = path_join(directory,PIXELINA_TEMP_PATTERN);
-    std::vector<char> writable(temporary.begin(),temporary.end());
-    writable.push_back(0);
-    int fd = mkstemp(writable.data());
-    bool ok = fd >= 0;
-    if (ok) {
-        size_t offset = 0;
-        while (offset < log.size()) {
-            ssize_t written = write(fd,log.data() + offset,log.size() - offset);
-            if (written < 0 && errno == EINTR) continue;
-            if (written <= 0) {
-                ok = false;
-                break;
-            }
-            offset += size_t(written);
-        }
-        if (fsync(fd)) ok = false;
-        if (close(fd)) ok = false;
-    }
-    if (ok && rename(writable.data(),path_join(directory,PIXELINA_DB).c_str())) ok = false;
-    if (!ok) {
-        if (fd >= 0) unlink(writable.data());
-        unlink(path.c_str());
-        error = "Image could not be added to the database; existing records are preserved.";
-        return false;
-    }
-    record.filename = filename;
-    return true;
-}
-
-bool directory_list(const std::string &path, std::vector<PixDirEntry> &entries, std::string &error)
-{
-    DIR* directory = opendir(path.c_str());
-    if (!directory) {
-        error = "Cannot open directory: " + std::string(std::strerror(errno));
-        return false;
-    }
-    entries.clear();
-    dirent* entry;
-    while ((entry = readdir(directory))) {
-        if (!std::strcmp(entry->d_name,".")) continue;
-        struct stat info;
-        if (stat(path_join(path,entry->d_name).c_str(),&info)) continue;
-        entries.push_back({entry->d_name,S_ISDIR(info.st_mode)});
-    }
-    closedir(directory);
-    std::sort(entries.begin(),entries.end(),[](const PixDirEntry &a, const PixDirEntry &b) { return a.directory != b.directory? a.directory > b.directory : a.name < b.name; });
+    std::string database_path = database.empty()? path_join(directory,PIXELINA_DB) : database;
+    if (!storage_write(database_path,log,error)) return false;
+    record.filename = saved.filename;
     return true;
 }

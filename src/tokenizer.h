@@ -34,12 +34,15 @@ class PixTokenz
     std::unordered_map<std::string,int> vocabulary; // exact embedded token-to-ID map
     std::unordered_map<std::string,unsigned> ranks; // merge pair ranks
     std::vector<std::string> specials; // embedded special-token spellings
+    std::vector<std::string> pieces; // token IDs decoded back to original UTF-8 bytes
+    std::vector<unsigned char> special_pieces; // IDs whose decoded pieces are template/control tokens
     std::string bytes[TOKENIZER_BYTE_COUNT]; // fixed byte-to-vocabulary strings
     bool bpe(const std::string &piece, std::vector<int> &ids) const;
     bool ordinary(const std::string &text, std::vector<int> &ids) const;
 public:
     bool load(const PixModelFile &encoder);
-    std::vector<int> encode(const std::string &text, bool chat = true) const;
+    std::vector<int> encode(const std::string &text, bool chat = true, bool special = true) const;
+    std::string decode(int id, bool special = false) const;
 };
 
 #endif

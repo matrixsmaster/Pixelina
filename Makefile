@@ -8,9 +8,9 @@ CXXFLAGS ?= -O3 -g
 CXXFLAGS += -std=c++17 -fno-exceptions -pthread -Wall -Wextra -Wno-missing-field-initializers
 LDLIBS += -pthread $(shell $(PKG_CONFIG) --libs sdl2)
 
-CORE := storage image json model tokenizer tensor backend_cpu kernels_cpu kernels_quant backend_vulkan convolution inference qwen_image qwen_vl qwen_vae
+CORE := os storage image json model tokenizer tensor backend_cpu kernels_cpu kernels_quant backend_vulkan convolution inference qwen_image qwen_vl qwen_vae qwen_chat
 OBJECTS := $(addprefix src/,$(addsuffix .o,$(CORE)))
-APP_OBJECTS := $(OBJECTS) src/ui.o src/pixuilib.o src/main.o
+APP_OBJECTS := $(OBJECTS) src/ui.o src/ui_sdl.o src/ui_refdlg.o src/ui_chatdlg.o src/pixuilib.o src/main.o
 HEADERS := $(wildcard src/*.h)
 
 ifeq ($(VULKAN),1)
@@ -29,7 +29,8 @@ $(APP_OBJECTS): src/%.o: src/%.cpp $(HEADERS) assets/pixelina_icon.h
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
 clean:
-	rm -f src/*.o shaders/*.spv shaders/*_shader.h assets/pixelina_icon.h assets/pixelina.png tools/embed tools/icon pixelina
+	rm -f src/*.o shaders/*.spv shaders/*_shader.h
+	rm -f assets/pixelina_icon.h assets/pixelina.png tools/embed tools/icon pixelina
 
 shaders/%.spv: shaders/%.comp shaders/decode.glsl src/vulkan_ops.h src/model_types.h
 	$(GLSLC) --target-env=vulkan1.0 $< -o $@

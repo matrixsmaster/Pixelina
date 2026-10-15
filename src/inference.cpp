@@ -4,10 +4,10 @@
  *
  * License: MIT
  */
-#include "inference.h"
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include "inference.h"
 
 static bool require_weight(const PixModelFile &model, const std::string &name, const std::vector<uint64_t> &shape)
 {
@@ -604,7 +604,7 @@ PixImage inference_generate(const PixSettings &settings, const std::string &prom
         float begin = INFERENCE_ENCODER_FRACTION + INFERENCE_DIFFUSION_FRACTION * float(step) / settings.steps;
         float span = INFERENCE_DIFFUSION_FRACTION / settings.steps;
         auto step_progress = [&](float fraction, const std::string &stage) {
-            return report(fraction,"Step " + std::to_string(step + 1) + "/" + std::to_string(settings.steps) + " | " + stage);
+            return report(fraction,"Step " + std::to_string(step + 1) + "/" + std::to_string(settings.steps) + ": " + stage);
         };
         if (!step_progress(begin,"Diffusion")) return {};
         error = INFERENCE_ERROR_NUMERICAL;

@@ -10,6 +10,7 @@
 #include "tensor.h"
 #include "tokenizer.h"
 
+#define PADDED_TOKEN_ZERO_POS
 #define INFERENCE_ERROR_SETTINGS 1
 #define INFERENCE_ERROR_MODEL 2
 #define INFERENCE_ERROR_PROMPT 3

@@ -25,6 +25,8 @@
 #define QWEN_IMAGE_HEADS 32
 #define QWEN_IMAGE_HEAD_DIM 128
 #define QWEN_IMAGE_CHANNELS 64
+// QwenLM/Qwen-Image-2.1 documents support for up to ten input images.
+#define QWEN_IMAGE_MAX_REFERENCES 10
 #define QWEN_IMAGE_EPSILON 0.000001f
 #define QWEN_IMAGE_TIME_DIM 256
 #define QWEN_IMAGE_TIME_PERIOD 10000.0
@@ -40,10 +42,6 @@
 #define QWEN_IMAGE_SIGMA_TERMINAL 0.02f
 #define QWEN_IMAGE_DIFFUSION_BEGIN 0.42f
 #define QWEN_IMAGE_DIFFUSION_SPAN 0.48f
-#define QWEN_IMAGE_MEMORY_LINE 256
-#define QWEN_IMAGE_RESIZE_TAP_RESERVE 128
-#define QWEN_IMAGE_KIB_BYTES 1024
-#define QWEN_IMAGE_HOST_RESERVE (512u * 1024u * 1024u)
 #define QWEN_IMAGE_STAGE_COUNT 5
 #define QWEN_IMAGE_MODULATION_PARTS 4
 #define QWEN_MEMORY_VISION_MAPS 8
@@ -91,26 +89,23 @@ struct PixQwenMemoryInput {
     std::vector<PixVisionGrid> vision; // processor grids
     std::vector<PixQwenImageShape> references; // fixed-reference latent grids
     PixQwenImageShape target; // target latent grid
-    std::array<uint64_t,QWEN_IMAGE_STAGE_COUNT> mapped_weights = {}; // inspected file working sets by stage
+    std::array<uint64_t,QWEN_IMAGE_STAGE_COUNT> mapped_weights = {}; // inspected file sizes bounding packed weight caches by stage
     std::array<uint64_t,QWEN_IMAGE_STAGE_COUNT> largest_weight = {}; // largest required packed binding by stage
-    uint64_t source_bytes = 0; // immutable original image planes retained by the caller
     size_t cpu_threads = 1; // score-row and operator scratch workers
-    bool kv_cache = false; // request F32 prefix caching with automatic budget fallback
+    bool kv_cache = false; // request F32 prefix caching with automatic device budget fallback
 };
 
 struct PixQwenMemoryLimits {
-    uint64_t host_bytes = 0; // available host memory after the OS/UI reserve
     uint64_t device_bytes = 0; // available application memory on the selected heap
     uint64_t max_buffer_bytes = UINT64_MAX; // largest permitted storage binding
-    bool shared_memory = false; // device allocations also consume the host budget
 };
 
 struct PixQwenStageMemory {
     PixQwenStage stage; // ordered sequential stage
     uint64_t activation_bytes = 0; // live activation peak including retained tensors
     uint64_t scratch_bytes = 0; // bounded operator and worker scratch
-    uint64_t retained_bytes = 0; // source, prepared and conditioning inputs surviving the stage
-    uint64_t host_peak_bytes = 0,device_peak_bytes = 0; // checked complete memory peaks
+    uint64_t retained_bytes = 0; // patches, features, conditioning and latents surviving the stage
+    uint64_t device_peak_bytes = 0; // checked complete device memory peak
     uint64_t largest_binding_bytes = 0; // maximum individual activation or packed weight buffer
     uint64_t packed_cache_bytes = 0; // weight residency admitted after stage reservation
 };

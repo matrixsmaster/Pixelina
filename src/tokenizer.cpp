@@ -24,6 +24,8 @@ bool PixTokenz::load(const PixModelFile &encoder)
     vocabulary.clear();
     ranks.clear();
     specials.clear();
+    pieces.clear();
+    special_pieces.clear();
     auto pre = encoder.metadata.find("tokenizer.ggml.pre");
     auto model = encoder.metadata.find("tokenizer.ggml.model");
     if (pre == encoder.metadata.end() || pre->second.scalar != "qwen2" || model == encoder.metadata.end() || model->second.scalar != "gpt2") return false;
@@ -56,6 +58,25 @@ bool PixTokenz::load(const PixModelFile &encoder)
         if (vocabulary.find(bytes[byte]) == vocabulary.end()) return false;
     }
     std::sort(specials.begin(),specials.end(),[](const std::string &a, const std::string &b) { return a.size() > b.size(); });
+    std::unordered_map<std::string,unsigned char> original_bytes;
+    for (unsigned byte = 0; byte < TOKENIZER_BYTE_COUNT; byte++) original_bytes.emplace(bytes[byte],byte);
+    pieces.resize(tokens.size());
+    special_pieces.resize(tokens.size());
+    for (size_t i = 0; i < tokens.size(); i++) {
+        if (types[i].integer() == TOKENIZER_SPECIAL_TYPE || types[i].integer() == TOKENIZER_USER_TYPE) {
+            special_pieces[i] = 1;
+            pieces[i] = tokens[i].scalar;
+            continue;
+        }
+        const std::string &token = tokens[i].scalar;
+        for (size_t cursor = 0; cursor < token.size();) {
+            size_t length = static_cast<unsigned char>(token[cursor]) < TOKENIZER_ASCII_LIMIT? 1 : 2;
+            auto found = original_bytes.find(token.substr(cursor,length));
+            if (found == original_bytes.end()) return false;
+            pieces[i] += char(found->second);
+            cursor += length;
+        }
+    }
     return true;
 }
 
@@ -144,10 +165,14 @@ bool PixTokenz::ordinary(const std::string &text, std::vector<int> &ids) const
     return true;
 }
 
-std::vector<int> PixTokenz::encode(const std::string &text, bool chat) const
+std::vector<int> PixTokenz::encode(const std::string &text, bool chat, bool special) const
 {
     std::string input = chat? std::string(TOKENIZER_CHAT_PREFIX) + text + TOKENIZER_CHAT_SUFFIX : text;
     std::vector<int> ids;
+    if (!special) {
+        if (!ordinary(input,ids) || (chat && ids.size() > MODEL_QWEN_CONTEXT)) return {};
+        return ids;
+    }
     size_t cursor = 0;
     while (cursor < input.size()) {
         size_t next = input.size();
@@ -166,4 +191,11 @@ std::vector<int> PixTokenz::encode(const std::string &text, bool chat) const
     }
     if (chat && ids.size() > MODEL_QWEN_CONTEXT) return {};
     return ids;
+}
+
+std::string PixTokenz::decode(int id, bool special) const
+{
+    if (id < 0 || size_t(id) >= pieces.size()) return {};
+    if (!special && special_pieces[size_t(id)]) return {};
+    return pieces[size_t(id)];
 }

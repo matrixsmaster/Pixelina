@@ -1,0 +1,22 @@
+/* This file is a part of 'Pixelina' Image Generator, Editor, and Viewer.
+ *
+ * (C) Dmitry 'sciloaf' Solovyev, 2026
+ *
+ * License: MIT
+ */
+#ifndef PIXELINA_IMAGE_H
+#define PIXELINA_IMAGE_H
+
+#define STBI_MAX_DIMENSIONS 16384
+#define IMAGE_RESAMPLE_BITS 22
+#define IMAGE_RESAMPLE_ONE (1 << IMAGE_RESAMPLE_BITS)
+#define IMAGE_LANCZOS_RADIUS 3.0
+#define IMAGE_BICUBIC_RADIUS 2.0
+#define IMAGE_BICUBIC_COEFFICIENT -0.5
+#define IMAGE_BICUBIC_INNER_QUADRATIC 2.0
+#define IMAGE_BICUBIC_INNER_LINEAR 3.0
+#define IMAGE_BICUBIC_OUTER_QUADRATIC 5.0
+#define IMAGE_BICUBIC_OUTER_LINEAR 8.0
+#define IMAGE_BICUBIC_OUTER_CONSTANT 4.0
+
+#endif

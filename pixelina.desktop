@@ -1,9 +1,10 @@
 [Desktop Entry]
 Type=Application
 Name=Pixelina
-Comment=Generate images with Z-Image Turbo
-Exec=pixelina
+Comment=AI Image generator, editor, and viewer
+Exec=pixelina %f
 Icon=pixelina
 Terminal=false
 Categories=Graphics;
+MimeType=image/png;image/jpeg;
 StartupWMClass=Pixelina

@@ -7,24 +7,12 @@
 #ifndef PIXELINA_STORAGE_H
 #define PIXELINA_STORAGE_H
 
+#include "os.h"
 #include <cstdint>
+#include <map>
 #include <string>
 #include <vector>
 
-#define PADDED_TOKEN_ZERO_POS
-#define STBI_MAX_DIMENSIONS 16384
-#define IMAGE_TEMP_SUFFIX ".pixelina-export-XXXXXX"
-#define IMAGE_RESAMPLE_BITS 22
-#define IMAGE_RESAMPLE_ONE (1 << IMAGE_RESAMPLE_BITS)
-#define IMAGE_LANCZOS_RADIUS 3.0
-#define IMAGE_BICUBIC_RADIUS 2.0
-#define IMAGE_BICUBIC_COEFFICIENT -0.5
-#define IMAGE_BICUBIC_INNER_QUADRATIC 2.0
-#define IMAGE_BICUBIC_INNER_LINEAR 3.0
-#define IMAGE_BICUBIC_OUTER_QUADRATIC 5.0
-#define IMAGE_BICUBIC_OUTER_LINEAR 8.0
-#define IMAGE_BICUBIC_OUTER_CONSTANT 4.0
-#define IMAGE_PI 3.1415926535897932384626433832795
 #define PIXELINA_NAME "Pixelina"
 #define PIXELINA_CPU "CPU"
 #define PIXELINA_VULKAN "Vulkan"
@@ -33,17 +21,16 @@
 #define PIXELINA_EXT_JPG ".jpg"
 #define PIXELINA_EXT_JPEG ".jpeg"
 #define PIXELINA_EXT_PNG ".png"
-#define PIXELINA_DEFAULT_DIFFUSER "z-image-turbo-Q8_0.gguf"
-#define PIXELINA_DEFAULT_ENCODER "Qwen3-4B-Q8_0.gguf"
-#define PIXELINA_DEFAULT_VAE "ae.safetensors"
 #define PIXELINA_DB "pixelina.txt"
-#define PIXELINA_VERSION "$v1;"
-#define PIXELINA_EDIT_VERSION "$v2;"
-#define PIXELINA_EDIT_RECORD_FIELDS 13
-#define QWEN_IMAGE_DEFAULT_STEPS 40
-#define QWEN_IMAGE_MAX_STEPS (1 << 24)
-#define QWEN_IMAGE_DEFAULT_REFERENCE_RESOLUTION 1024
-#define QWEN_IMAGE_MULTIPLE 32
+#define PIXELINA_USER_DIRECTORY ".pixelina"
+#define PIXELINA_GLOBAL_DB "data.txt"
+#define PIXELINA_CONFIG "config.txt"
+#define PIXELINA_LOG_GEN_VERSION "$v1;"
+#define PIXELINA_LOG_GEN_FIELDS 11
+#define PIXELINA_LOG_EDIT_VERSION "$v2;"
+#define PIXELINA_LOG_EDIT_FIELDS 13
+#define PIXELINA_EDIT_MAX_STEPS (1 << 24)
+#define PIXELINA_EDIT_DEF_REFRES 1024
 #define PIXELINA_JPG_QUALITY 95
 #define PIXELINA_IMAGE_MULTIPLE 16
 #define PIXELINA_DEFAULT_SEED 1337
@@ -54,8 +41,8 @@
 #define PIXELINA_THUMB_SIZE 112
 #define PIXELINA_THUMB_CACHE 32
 #define PIXELINA_MAX_IMAGE_NUMBER 99999
-#define PIXELINA_RECORD_FIELDS 11
 #define PIXELINA_TEMP_PATTERN ".pixelina-XXXXXX"
+#define QWEN_IMAGE_MULTIPLE 32
 
 struct PixSettings {
     uint64_t seed = PIXELINA_DEFAULT_SEED; // actual noise seed, retained for reproduction
@@ -63,9 +50,9 @@ struct PixSettings {
     int height = PIXELINA_DEFAULT_SIZE; // output height in pixels
     int steps = PIXELINA_DEFAULT_STEPS; // diffuser evaluations
     float shift = PIXELINA_DEFAULT_SHIFT; // flow-matching schedule shift
-    std::string diffuser = PIXELINA_DEFAULT_DIFFUSER; // selected diffuser file
-    std::string encoder = PIXELINA_DEFAULT_ENCODER; // selected text encoder file
-    std::string vae = PIXELINA_DEFAULT_VAE; // selected VAE file
+    std::string diffuser; // selected diffuser file
+    std::string encoder; // selected text encoder file
+    std::string vae; // selected VAE file
     std::string backend = PIXELINA_CPU; // selected execution backend
     std::string format = PIXELINA_JPG; // output format for Save
 };
@@ -78,8 +65,8 @@ struct PixEditSettings {
     uint64_t seed = PIXELINA_DEFAULT_SEED; // noise seed
     int width = PIXELINA_DEFAULT_SIZE; // output pixel width
     int height = PIXELINA_DEFAULT_SIZE; // output pixel height
-    int steps = QWEN_IMAGE_DEFAULT_STEPS; // Euler evaluations
-    int reference_resolution = QWEN_IMAGE_DEFAULT_REFERENCE_RESOLUTION; // reference area-side parameter
+    int steps = PIXELINA_DEFAULT_STEPS; // Euler evaluations
+    int reference_resolution = PIXELINA_EDIT_DEF_REFRES; // reference area-side parameter
     std::string diffuser; // selected diffuser GGUF
     std::string encoder; // selected language GGUF
     std::string vision; // matching vision/projector GGUF
@@ -104,11 +91,6 @@ struct PixRecord {
     std::string prompt; // literal multiline prompt
 };
 
-struct PixDirEntry {
-    std::string name; // entry name, without parent path
-    bool directory; // directory selector navigation flag
-};
-
 enum PixImageFilter {
     PIX_IMAGE_BICUBIC,PIX_IMAGE_LANCZOS
 };
@@ -124,14 +106,14 @@ bool edit_settings_valid(const PixEditSettings &settings, std::string &error);
 bool image_valid(const PixImage &image);
 bool database_parse(const std::string &text, std::vector<PixRecord> &records, std::string &error);
 std::string database_record(const PixRecord &record);
-bool database_load(const std::string &directory, std::vector<PixRecord> &records, std::string &error);
-bool storage_save(const std::string &directory, PixRecord &record, const PixImage &image, std::string &error);
+bool config_load(const std::string &directory, std::map<std::string,std::string> &values, std::string &error);
+bool config_save(const std::string &directory, const std::map<std::string,std::string> &values, std::string &error);
+bool database_load(const std::string &directory, std::vector<PixRecord> &records, std::string &error, const std::string &database = {});
+bool storage_save(const std::string &directory, PixRecord &record, const PixImage &image, std::string &error, const std::string &database = {});
 bool image_decode(const unsigned char* bytes, size_t count, PixImage &image, std::string &error);
 bool image_load(const std::string &path, PixImage &image, std::string &error);
 bool image_save(const std::string &path, const PixImage &image, std::string &error);
 PixImage image_thumbnail(const PixImage &image);
 PixImage image_resize(const PixImage &image, int width, int height, PixImageFilter filter, PixImageAlpha alpha);
-std::string path_join(const std::string &directory, const std::string &name);
-bool directory_list(const std::string &path, std::vector<PixDirEntry> &entries, std::string &error);
 
 #endif

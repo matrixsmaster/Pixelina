@@ -130,10 +130,10 @@ public:
     bool initialize();
     std::string device_name() const;
     bool validate_dimensions(const PixSettings &settings) const;
-    bool memory_limits(uint64_t &bytes, uint64_t &range, bool &shared) const;
+    bool memory_limits(uint64_t &bytes, uint64_t &range) const;
     bool prepare_stage(uint64_t activation_bytes, uint64_t scratch_bytes);
 
-    uint64_t packed_weight_budget = UINT64_MAX; // per-job cache admission after host/device planning
+    uint64_t packed_weight_budget = UINT64_MAX; // per-job cache admission after device planning
 };
 
 bool vulkan_matmul(const PixModelFile &file, const PixWeight &weight, const float* input, size_t columns, float* output);
@@ -148,6 +148,7 @@ PixTensor vulkan_conv(const PixModelFile &model, const std::string &name, const 
 PixTensor vulkan_groupnorm(const PixModelFile &model, const std::string &name, const PixTensor &input);
 PixTensor vulkan_embedding(const PixModelFile &model, const PixWeight &weight, const std::vector<int> &ids);
 void vulkan_copy_rows(const PixTensor &source, PixTensor &destination, size_t rows, size_t source_row = 0, size_t source_feature = 0, size_t destination_row = 0);
+bool vulkan_copy_features(const PixTensor &source, PixTensor &destination, size_t destination_feature);
 void vulkan_layout(unsigned operation, const PixTensor &source, PixTensor &destination, size_t width, size_t patch = 0);
 void vulkan_bias(PixTensor &output, const std::vector<float> &bias);
 bool vulkan_rows(const PixTensor &source, PixTensor &destination, const std::vector<size_t> &rows, bool scatter);

@@ -7,23 +7,24 @@
 #ifndef PIXELINA_UI_H
 #define PIXELINA_UI_H
 
-#include <SDL.h>
+#include "ui_sdl.h"
 #include "storage.h"
 #include "pixuilib.h"
 #include "inference.h"
 #include <array>
 #include <atomic>
 
-#define PIXELINA_ABOUT { PIXELINA_NAME, "(C) Dmitry 'sciloaf' Solovyev, 2026", "Z-Image Turbo image generation", "Qwen Image 2.1 image editing" }
+#define PIXELINA_VERSION "0.3"
+#define PIXELINA_ABOUT { PIXELINA_NAME " " PIXELINA_VERSION, "(C) Dmitry 'sciloaf' Solovyev, 2026", "Z-Image Turbo image generation", "Qwen Image 2.1 image editing" }
 
-#define UI_START_WIDTH 1100
 #define UI_CAPTION_SEPARATOR " - "
 #define UI_ABOUT_PREFIX "About "
+#define UI_IMAGE_TITLE "Image"
 #define UI_STATUS_BUFFER 64
+#define UI_IMAGE_EXTENSIONS {".jpg",".jpeg",".jpe",".png",".bmp",".tga",".psd",".gif",".hdr",".pic",".pnm",".ppm",".pgm"}
 #define UI_LEFT_FRACTION 0.32f
 #define UI_PROMPT_FRACTION 0.30f
 #define UI_CAROUSEL_FRACTION 0.24f
-#define UI_START_HEIGHT 780
 #define UI_STATUS_HEIGHT 26
 #define UI_SPLITTER_WIDTH 6
 #define UI_PANEL_MIN 140
@@ -35,32 +36,37 @@
 #define UI_EDIT_SETTINGS_COUNT 9
 #define UI_SETTINGS_PAGES 2
 #define UI_SETTINGS_FOOTER (UI_FIELD_HEIGHT * 2 + UI_MARGIN)
-#define CMD_OPEN_IMAGE 14
-#define CMD_CLEAR 15
-#define CMD_AUTO_SEED 16
+#define UI_CONFIG_BACKEND "backend"
+#define UI_CONFIG_FORMAT "format"
+#define UI_CONFIG_AUTO_SEED "auto_seed"
+#define UI_CONFIG_DECODE "decode_on_the_go"
+#define UI_CONFIG_SCALED "scaled_view"
+#define UI_CONFIG_GLOBAL_DB "global_db"
+#define UI_CONFIG_PROMPT "prompt"
+#define UI_CONFIG_DIRECTORY "directory"
+#define UI_CONFIG_BROWSER_DIRECTORY "browser_directory"
+#define UI_CONFIG_TAB "settings_tab"
+#define UI_CONFIG_GENERATE_PREFIX "generate_"
+#define UI_CONFIG_EDIT_PREFIX "edit_"
+#define UI_CONFIG_WINDOW_X "window_x"
+#define UI_CONFIG_WINDOW_Y "window_y"
+#define UI_CONFIG_WINDOW_WIDTH "window_width"
+#define UI_CONFIG_WINDOW_HEIGHT "window_height"
+#define UI_CONFIG_MAXIMIZED "window_maximized"
 #define UI_SETTINGS_MIN_WIDTH 240
 #define UI_INVALID_EDIT_NUMBERS "Seed, dimensions, steps and reference resolution must be valid numbers."
 #define UI_SETTINGS_ROW 48
-#define CMD_OPEN 1
-#define CMD_SAVE 2
-#define CMD_SAVE_AS 3
-#define CMD_QUIT 4
-#define CMD_GENERATE 5
-#define CMD_SCALED 7
-#define CMD_ABOUT 8
-#define CMD_JPG 9
-#define CMD_PNG 10
-#define CMD_CPU 11
-#define CMD_VULKAN 12
-#define CMD_DECODE 13
 #define UI_BROWSE_BUTTON_WIDTH 32
 #define UI_MODEL_FIRST UI_DIFFUSER_FIELD
 #define UI_GENERATE_TEXT "Generate"
-#define UI_STOP_TEXT "Stop"
-#define UI_STOPPING_TEXT "Stopping..."
 #define UI_INVALID_NUMBERS "Seed, dimensions, steps and shift must be valid numbers."
 #define UI_STOPPED_TEXT "Generation stopped"
 #define UI_READY_TEXT "Ready"
+
+enum PixelinaCommand {
+    CMD_OPEN = 1,CMD_SAVE,CMD_SAVE_AS,CMD_QUIT,CMD_GENERATE,CMD_SCALED,CMD_ABOUT,
+    CMD_JPG,CMD_PNG,CMD_CPU,CMD_VULKAN,CMD_DECODE,CMD_OPEN_IMAGE,CMD_CLEAR,CMD_AUTO_SEED,CMD_GLOBAL_DB,CMD_MULTI_REFERENCE,CMD_CHAT
+};
 
 enum PixelinaGroup {
     UI_PROMPT_GROUP,UI_SETTINGS_GROUP,UI_CAROUSEL_GROUP,UI_IMAGE_GROUP,UI_GROUP_COUNT
@@ -93,45 +99,6 @@ struct PixJob {
 
 using PixJobInference = std::function<PixImage(const PixJob&,const InferenceProgress&,int&)>;
 
-class PixUISDLCanvas : public PixUICanvas
-{
-public:
-    void fill(const PixUIRect &rect, unsigned color) override;
-    void point(int x, int y, unsigned color) override;
-    void image(void* texture, const PixUIRect &rect) override;
-    bool clip(PixUIRect &rect) const override;
-    void set_clip(const PixUIRect* rect) override;
-    uint64_t ticks() const override;
-    std::string clipboard() const override;
-    void clipboard(const std::string &text) override;
-    void text_input(const PixUIRect &rect) override;
-    PixUIRect window_rect() const override;
-    void window_command(PixUIWindowCommand command, const PixUIRect &rect) override;
-    bool maximized() const override;
-    void window_title(const std::string &title) override;
-    PixUIEvent translate(const SDL_Event &input);
-
-    SDL_Renderer* renderer = nullptr; // application renderer
-    SDL_Window* window = nullptr; // application native window
-
-private:
-    unsigned draw_color = 0; // cached renderer draw color
-    bool color_valid = false; // renderer color has been set through this adapter
-    bool clipped = false; // clipping enabled through this adapter
-    PixUIRect clipping; // cached clip rectangle
-    void set_color(unsigned color);
-};
-
-class PixUISystemFiles : public PixUIFileSystem
-{
-public:
-    bool read_directory(const std::string &path, std::vector<PixUIFileEntry> &entries, std::string &error) override;
-    std::string normalize(const std::string &path) override;
-    PixUIPathKind path_kind(const std::string &path) override;
-    std::string join_path(const std::string &directory, const std::string &name) override;
-    std::string parent_path(const std::string &path) override;
-};
-
 class PixelinaForm : public PixUIForm
 {
 public:
@@ -152,12 +119,12 @@ public:
     std::array<PixUIEdit*,UI_EDIT_SETTINGS_COUNT> edit_fields; // owned Edit editors
     std::array<PixUIButton*,UI_EDIT_SETTINGS_COUNT> edit_browse = {}; // Edit model selection actions
     std::array<PixUIButton*,UI_SETTINGS_PAGES> random_seed = {}; // seed randomization actions
+    float left_fraction = UI_LEFT_FRACTION,prompt_fraction = UI_PROMPT_FRACTION,carousel_fraction = UI_CAROUSEL_FRACTION; // persistent pane ratios
 
 private:
     PixUIPanel* menu_background; // full-width menu background
     std::array<PixUIGroupBox*,UI_GROUP_COUNT> groups; // workspace containers
     std::array<PixUISplitter*,UI_SPLITTER_COUNT> splitters; // owned pane dividers
-    float left_fraction = UI_LEFT_FRACTION,prompt_fraction = UI_PROMPT_FRACTION,carousel_fraction = UI_CAROUSEL_FRACTION; // owned pane ratios
 };
 
 class Pixelina
@@ -165,7 +132,7 @@ class Pixelina
 public:
     Pixelina() = default;
     ~Pixelina();
-    bool initialize(const std::string &directory, bool png, std::string &error);
+    bool initialize(const std::string &directory, bool png, std::string &error, bool default_directory = false, bool use_saved_directory = false);
     int run();
 
 private:
@@ -174,7 +141,6 @@ private:
     PixUISDLCanvas canvas; // shared renderer and control capture
     PixelinaForm main_form{canvas}; // owns persistent workspace controls
     PixUIMenu* menus = nullptr; // borrowed menu root owned by main_form
-    PixUISystemFiles files; // filesystem provider for the reusable selector
     SDL_Renderer* renderer = nullptr; // SDL renderer owned by the application
     SDL_Window* window = nullptr; // outer resizable window
     SDL_Texture* app_icon = nullptr; // embedded application icon for the About dialog
@@ -192,10 +158,12 @@ private:
     double worker_seconds = 0; // measured complete generation time
     float generation_progress = 0; // UI progress snapshot
     double generation_seconds = 0; // last complete generation duration
+    uint64_t generation_started = 0; // UI clock at the start of the current job
     PixJob job; // frozen settings, prompt and references read by the worker
     PixRecord image_record; // frozen generation metadata of the displayed image
     bool image_has_record = false; // current picture has generation metadata
     std::string image_source_path; // absolute current picture provenance, empty for temporary results
+    std::vector<std::string> reference_paths; // accepted ordered references retained until Clear
     std::string launch_directory; // fixed model-path resolution directory
     PixEditSettings edit_settings; // independent Edit page values
     PixImage image; // complete current RGB and optional alpha planes
@@ -203,9 +171,13 @@ private:
     bool running = true; // event-loop lifetime
     bool busy = false; // model worker active
     bool auto_seed = true; // advance the active page seed after starting generation
-    std::string workdir; // image/database directory
+    bool global_db = false; // select the user database instead of the directory database
+    bool initialized = false; // save configuration only after successful initialization
+    std::string user_directory; // persistent configuration and global database directory
+    std::string workdir; // selected output image directory
     PixSettings settings; // generation values
     std::vector<PixRecord> records; // versioned database entries
+    std::vector<std::string> images; // supported image files in the current directory
     std::string dialog_message; // modal message text
     int width = UI_START_WIDTH; // current client width
     int height = UI_START_HEIGHT; // current client height
@@ -233,7 +205,10 @@ private:
     void generation_image(PixImage completed);
     void build_gui();
     void build_menus();
-    PixUIThumbCache load_thumbnail(size_t index);
+    void restore_configuration(const std::map<std::string,std::string> &values);
+    void save_configuration();
+    void switch_database();
+    PixUIThumbCache load_thumbnail(const std::string &path);
     static int generation_worker(void* context);
 };
 

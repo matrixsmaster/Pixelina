@@ -169,7 +169,7 @@ PixVLInput qwen_vl_prepare(const PixTokenz &tokenizer, const std::string &prompt
         }
         input.grids.push_back(grid);
         if (reference) text += ' ';
-        text += "<image" + std::to_string(reference + 1) + ">" QWEN_VL_VISION_START_TEXT QWEN_VL_IMAGE_PAD QWEN_VL_VISION_END_TEXT;
+        text += QWEN_VL_REFERENCE_PREFIX + std::to_string(reference + 1) + ">" QWEN_VL_VISION_START_TEXT QWEN_VL_IMAGE_PAD QWEN_VL_VISION_END_TEXT;
     }
     text += (prompt.empty()? " " : prompt) + std::string(TOKENIZER_CHAT_SUFFIX);
     std::vector<int> ids = tokenizer.encode(text,false);
@@ -318,9 +318,11 @@ PixVisionFeatures qwen_vl_vision(const PixModelFile &vision, const PixVLInput &i
     return features;
 }
 
-PixQwenCondition qwen_vl_language(const PixModelFile &language, const PixVLInput &input, PixVisionFeatures features, const InferenceProgress &progress)
+PixTensor qwen_vl_forward(const PixModelFile &language, const PixVLInput &input, PixVisionFeatures features, const InferenceProgress &progress, PixVLCache* cache)
 {
-    if (input.ids.empty() || input.ids.size() != input.image_slots.size() || input.trim >= input.ids.size()) return {};
+    if (input.ids.empty() || input.ids.size() != input.image_slots.size()) return {};
+    for (const auto &axis : input.positions) if (axis.size() != input.ids.size()) return {};
+    if (cache && (cache->rows > cache->capacity || input.ids.size() > cache->capacity - cache->rows)) return {};
     const PixWeight &embedding = language.tensor(QWEN_VL_EMBEDDING_WEIGHT);
     size_t stride = size_t(weight_bytes({QWEN_VL_HIDDEN},embedding.type));
     PixTensor hidden(input.ids.size(),QWEN_VL_HIDDEN);
@@ -338,7 +340,7 @@ PixQwenCondition qwen_vl_language(const PixModelFile &language, const PixVLInput
     for (size_t row = 0; row < input.image_slots.size(); row++) {
         if (input.image_slots[row]) slots.push_back(row);
     }
-    if (!tensor_scatter(hidden,features.merged,slots)) return {};
+    if (!slots.empty() && !tensor_scatter(hidden,features.merged,slots)) return {};
     features.merged = PixTensor();
     PixRotary rotary;
     rotary.cosine.resize(hidden.rows * QWEN_VL_HEAD_DIM / 2);
@@ -354,6 +356,7 @@ PixQwenCondition qwen_vl_language(const PixModelFile &language, const PixVLInput
         }
     }
     for (size_t layer = 0; layer < QWEN_VL_LAYERS; layer++) {
+        if (cache && progress && !progress(0,"Language block " + std::to_string(layer + 1))) return {};
         std::string prefix = QWEN_VL_BLOCK_PREFIX + std::to_string(layer) + ".";
         PixTensor normalized = tensor_norm(hidden,tensor_vector(language,prefix + QWEN_VL_ATTENTION_NORM),QWEN_VL_EPSILON);
         PixTensor q = tensor_linear(language,prefix + "attn_q",normalized,false),k = tensor_linear(language,prefix + "attn_k",normalized,false),v = tensor_linear(language,prefix + "attn_v",normalized,false);
@@ -371,7 +374,23 @@ PixQwenCondition qwen_vl_language(const PixModelFile &language, const PixVLInput
         k.channels = QWEN_VL_KV_HEADS * QWEN_VL_HEAD_DIM;
         tensor_rope(q,QWEN_VL_HEADS,rotary.cosine,rotary.sine,false);
         tensor_rope(k,QWEN_VL_KV_HEADS,rotary.cosine,rotary.sine,false);
-        PixTensor attended = tensor_attention(q,k,v,QWEN_VL_HEADS,QWEN_VL_KV_HEADS,true);
+        PixTensor attended;
+        if (cache) {
+            PixVLCacheLayer &saved = cache->layers[layer];
+            if (saved.key.values.size() != cache->capacity * k.channels || saved.value.values.size() != cache->capacity * v.channels) return {};
+#ifdef PIXELINA_WITH_VULKAN
+            if (vulkan_active_state()) {
+                vulkan_copy_rows(k,saved.key,k.rows,0,0,cache->rows);
+                vulkan_copy_rows(v,saved.value,v.rows,0,0,cache->rows);
+            } else
+#endif
+            {
+                std::copy(k.values.begin(),k.values.end(),saved.key.values.begin() + cache->rows * k.channels);
+                std::copy(v.values.begin(),v.values.end(),saved.value.values.begin() + cache->rows * v.channels);
+            }
+            saved.key.rows = saved.value.rows = cache->rows + k.rows;
+            attended = tensor_attention(q,saved.key,saved.value,QWEN_VL_HEADS,QWEN_VL_KV_HEADS,{{0,q.rows,saved.key.rows,true}},cache->rows);
+        } else attended = tensor_attention(q,k,v,QWEN_VL_HEADS,QWEN_VL_KV_HEADS,true);
         q = k = v = PixTensor();
         tensor_add(hidden,tensor_linear(language,prefix + "attn_output",attended,false));
         attended = PixTensor();
@@ -382,7 +401,7 @@ PixQwenCondition qwen_vl_language(const PixModelFile &language, const PixVLInput
         tensor_gate(gate,up);
         up = PixTensor();
         tensor_add(hidden,tensor_linear(language,prefix + QWEN_VL_FFN_DOWN,gate,false));
-        if (layer < QWEN_VISION_DEEPSTACK) {
+        if (!slots.empty() && layer < QWEN_VISION_DEEPSTACK) {
             PixTensor selected = tensor_gather(hidden,slots);
             tensor_add(selected,features.deepstack[layer]);
             if (!tensor_scatter(hidden,selected,slots)) return {};
@@ -391,6 +410,15 @@ PixQwenCondition qwen_vl_language(const PixModelFile &language, const PixVLInput
         if (hidden.values.empty()) return {};
         if (progress && !progress(QWEN_VL_VISION_FRACTION + QWEN_VL_LANGUAGE_FRACTION * float(layer + 1) / QWEN_VL_LAYERS,"Language block " + std::to_string(layer + 1))) return {};
     }
+    if (cache) cache->rows += hidden.rows;
+    return hidden;
+}
+
+PixQwenCondition qwen_vl_language(const PixModelFile &language, const PixVLInput &input, PixVisionFeatures features, const InferenceProgress &progress)
+{
+    if (input.trim >= input.ids.size()) return {};
+    PixTensor hidden = qwen_vl_forward(language,input,std::move(features),progress);
+    if (hidden.values.empty()) return {};
     PixQwenCondition condition;
     condition.hidden = tensor_slice(hidden,input.trim,hidden.rows - input.trim,0,hidden.channels);
     condition.image_slots.assign(input.image_slots.begin() + input.trim,input.image_slots.end());

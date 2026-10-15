@@ -1026,12 +1026,11 @@ bool VulkanSession::validate_dimensions(const PixSettings &settings) const
     return largest <= state->properties.limits.maxStorageBufferRange;
 }
 
-bool VulkanSession::memory_limits(uint64_t &bytes, uint64_t &range, bool &shared) const
+bool VulkanSession::memory_limits(uint64_t &bytes, uint64_t &range) const
 {
     if (!state) return false;
     bytes = state->heap_limit;
     range = state->properties.limits.maxStorageBufferRange;
-    shared = state->properties.deviceType != VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU;
     if (state->memory_properties) {
         VkPhysicalDeviceMemoryBudgetPropertiesEXT budget = {};
         budget.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT;
@@ -1267,6 +1266,18 @@ void vulkan_copy_rows(const PixTensor &source, PixTensor &destination, size_t ro
     push[4] = uint32_t(source_row * source.channels + source_feature);
     push[5] = uint32_t(destination_row * destination.channels);
     if (!active_state->dispatch(VULKAN_PIPELINE_GENERAL,push,{source.values.data(),nullptr,nullptr,nullptr,destination.values.data()},groups_for(rows * destination.channels))) destination = PixTensor();
+}
+
+bool vulkan_copy_features(const PixTensor &source, PixTensor &destination, size_t destination_feature)
+{
+    if (source.rows != 1 || destination.rows != 1 || source.values.empty() || destination.values.empty() || destination_feature > destination.channels || source.channels > destination.channels - destination_feature) return false;
+    VulkanPush push = {};
+    push[0] = VK_OP_COPY;
+    push[1] = 1;
+    push[2] = uint32_t(source.channels);
+    push[3] = uint32_t(source.channels);
+    push[5] = uint32_t(destination_feature);
+    return active_state->dispatch(VULKAN_PIPELINE_GENERAL,push,{source.values.data(),nullptr,nullptr,nullptr,destination.values.data()},groups_for(source.channels));
 }
 
 void vulkan_layout(unsigned operation, const PixTensor &source, PixTensor &destination, size_t width, size_t patch)

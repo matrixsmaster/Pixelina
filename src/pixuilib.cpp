@@ -4,9 +4,10 @@
  *
  * License: MIT
  */
-#include "pixuilib.h"
-#include "../third_party/font8x8_basic.h"
 #include <algorithm>
+#include "pixuilib.h"
+#include "os.h"
+#include "../third_party/font8x8_basic.h"
 
 static size_t previous_character(const std::string &text, size_t offset)
 {
@@ -91,6 +92,13 @@ void PixUICanvas::button(const PixUIRect &rect, const std::string &label, bool p
     } else text(rect.x + std::max(UI_TEXT_PADDING,(rect.w - int(label.size()) * UI_FONT_WIDTH) / 2),rect.y + (rect.h - UI_FONT_HEIGHT) / 2,label,COLOR_DARK);
 }
 
+void PixUICanvas::pointer_position(int &x, int &y) const
+{
+    PixUIRect rect = window_rect();
+    x = rect.x + pointer_x;
+    y = rect.y + pointer_y;
+}
+
 bool PixUICanvas::event(PixUIForm &form, const PixUIEvent &input)
 {
     form.prepare_modal();
@@ -104,16 +112,22 @@ bool PixUICanvas::event(PixUIForm &form, const PixUIEvent &input)
         if (!control->interactive()) release_capture();
         else {
             bool handled = control->event(input);
+            if (handled) {
+                for (PixUIObject* owner = control; owner; owner = owner->parent) owner->repaint = true;
+            }
             if (input.type == PIXUI_UP && input.button == PIXUI_LEFT_BUTTON) captured = nullptr;
             return handled;
         }
     }
-    return form.event(input);
+    bool handled = form.event(input);
+    if (handled) form.repaint = true;
+    return handled;
 }
 
 void PixUICanvas::release_capture()
 {
     if (!captured) return;
+    for (PixUIObject* owner = captured; owner; owner = owner->parent) owner->repaint = true;
     captured->cancel_capture();
     captured = nullptr;
 }
@@ -140,6 +154,18 @@ bool PixUIObject::event(const PixUIEvent &input)
 void PixUIObject::cancel_capture()
 {
     if (canvas.captured == this) canvas.captured = nullptr;
+}
+
+bool PixUIObject::needs_repaint()
+{
+    if (painted_visible != visible || painted_enabled != enabled || painted_bounds.x != bounds.x || painted_bounds.y != bounds.y || painted_bounds.w != bounds.w || painted_bounds.h != bounds.h) {
+        repaint = true;
+        if (parent) parent->repaint = true;
+        painted_visible = visible;
+        painted_enabled = enabled;
+        painted_bounds = bounds;
+    }
+    return visible && repaint;
 }
 
 bool PixUIObject::interactive() const
@@ -175,6 +201,8 @@ PixUIPanel::PixUIPanel(PixUICanvas &context) : PixUIControl(context)
 
 void PixUIPanel::draw()
 {
+    needs_repaint();
+    repaint = false;
     if (!visible) return;
     if (background) canvas.fill(bounds,color);
     if (border) canvas.bevel(bounds,inset,false);
@@ -184,8 +212,20 @@ PixUILabel::PixUILabel(PixUICanvas &context, const std::string &text) : PixUICon
 {
 }
 
+bool PixUILabel::needs_repaint()
+{
+    if (caption != painted_caption || color != painted_color) {
+        repaint = true;
+        painted_caption = caption;
+        painted_color = color;
+    }
+    return PixUIObject::needs_repaint();
+}
+
 void PixUILabel::draw()
 {
+    needs_repaint();
+    repaint = false;
     if (!visible) return;
     if (background) canvas.fill(bounds,background_color);
     std::string text = caption;
@@ -220,6 +260,8 @@ void PixUIButton::cancel_capture()
 
 void PixUIButton::draw()
 {
+    needs_repaint();
+    repaint = false;
     if (!visible) return;
     canvas.button(bounds,caption,pressed);
 }
@@ -256,22 +298,29 @@ PixUIImage::PixUIImage(PixUICanvas &context) : PixUIControl(context)
 
 void PixUIImage::draw()
 {
+    needs_repaint();
+    repaint = false;
     if (!visible) return;
-    PixUIRect previous,effective = bounds;
+    draw_image(bounds);
+}
+
+void PixUIImage::draw_image(const PixUIRect &rect)
+{
+    PixUIRect previous,effective = rect;
     bool clipped = canvas.clip(previous);
-    if (clipped && !pixui_intersect(bounds,previous,effective)) return;
+    if (clipped && !pixui_intersect(rect,previous,effective)) return;
     canvas.set_clip(&effective);
     if (texture && width > 0 && height > 0) {
-        PixUIRect target = {bounds.x - offset_x,bounds.y - offset_y,width,height};
+        PixUIRect target = {rect.x - offset_x,rect.y - offset_y,width,height};
         if (scaled) {
-            float scale = std::min(float(bounds.w) / width,float(bounds.h) / height);
+            float scale = std::min(float(rect.w) / width,float(rect.h) / height);
             target.w = int(width * scale);
             target.h = int(height * scale);
-            target.x = bounds.x + (bounds.w - target.w) / 2;
-            target.y = bounds.y + (bounds.h - target.h) / 2;
+            target.x = rect.x + (rect.w - target.w) / 2;
+            target.y = rect.y + (rect.h - target.h) / 2;
         }
         canvas.image(texture,target);
-    } else if (!placeholder.empty()) canvas.text(bounds.x + UI_LABEL_PADDING,bounds.y + UI_LABEL_PADDING,placeholder,COLOR_DISABLED);
+    } else if (!placeholder.empty()) canvas.text(rect.x + UI_LABEL_PADDING,rect.y + UI_LABEL_PADDING,placeholder,COLOR_DISABLED);
     canvas.set_clip(clipped? &previous : nullptr);
 }
 
@@ -299,6 +348,8 @@ PixUIThumb::PixUIThumb(PixUICanvas &context) : PixUIImage(context)
 
 void PixUIThumb::draw()
 {
+    needs_repaint();
+    repaint = false;
     if (!visible) return;
     if (source) {
         PixUIThumbCache &preview = source();
@@ -308,9 +359,7 @@ void PixUIThumb::draw()
     }
     PixUIRect cell = bounds;
     canvas.fill(cell,selected? COLOR_SELECTED : COLOR_LIGHT);
-    bounds = {cell.x + UI_TEXT_PADDING,cell.y + UI_CONTENT_INSET,cell.w - UI_TEXT_PADDING * 2,cell.h - UI_LINE_HEIGHT - UI_CONTENT_INSET};
-    PixUIImage::draw();
-    bounds = cell;
+    draw_image({cell.x + UI_TEXT_PADDING,cell.y + UI_CONTENT_INSET,cell.w - UI_TEXT_PADDING * 2,cell.h - UI_LINE_HEIGHT - UI_CONTENT_INSET});
     canvas.text(cell.x + UI_CONTENT_INSET,cell.y + cell.h - UI_LINE_HEIGHT,caption,selected? COLOR_LIGHT : COLOR_DARK);
 }
 
@@ -320,6 +369,8 @@ PixUIScrollbar::PixUIScrollbar(PixUICanvas &context) : PixUIControl(context)
 
 void PixUIScrollbar::draw()
 {
+    needs_repaint();
+    repaint = false;
     if (!visible || !position) return;
     canvas.bevel(bounds,true);
     int length = vertical? bounds.h : bounds.w;
@@ -381,6 +432,7 @@ PixUIMemo::~PixUIMemo()
 
 void PixUIMemo::set_text(const std::string &text)
 {
+    repaint = true;
     model.text = text;
     model.cursor = text.size();
     model.anchor = model.cursor;
@@ -389,12 +441,38 @@ void PixUIMemo::set_text(const std::string &text)
     model.reveal = true;
 }
 
+void PixUIMemo::scroll_to_end()
+{
+    layout();
+    model.cursor = model.text.size();
+    model.anchor = model.cursor;
+    model.scroll = std::max(0,scroll.total - scroll.page);
+    model.horizontal = 0;
+    model.reveal = false;
+    repaint = true;
+}
+
+bool PixUIMemo::needs_repaint()
+{
+    bool focused = active && interactive() && (!focus_owner || (!focus_owner->modal_blocked && focus_owner->active));
+    for (PixUIObject* owner = parent; focused && owner; owner = owner->parent) {
+        PixUIForm* form = dynamic_cast<PixUIForm*>(owner);
+        if (form && !form->active) focused = false;
+    }
+    if (focused && caret_phase != canvas.ticks() / UI_CARET_PERIOD) repaint = true;
+    return PixUIObject::needs_repaint();
+}
+
 void PixUIMemo::draw()
 {
+    needs_repaint();
+    repaint = false;
     if (!visible) return;
+    caret_phase = canvas.ticks() / UI_CARET_PERIOD;
     draw_editor();
     layout();
     if (multiline) scroll.draw();
+    repaint = false;
 }
 
 bool PixUIMemo::event(const PixUIEvent &input)
@@ -437,6 +515,14 @@ void PixUIMemo::edit(const PixUIEvent &event)
     PixUIEditor &editor = model;
     const PixUIRect &area = bounds;
     if (event.type != PIXUI_KEY && event.type != PIXUI_TEXT) return;
+    if (read_only) {
+        if (event.type == PIXUI_TEXT) return;
+        if (event.key == PIXUI_BACKSPACE || event.key == PIXUI_DELETE || event.key == PIXUI_RETURN) return;
+        if ((event.mod & PIXUI_CTRL) && (event.key == 'v' || event.key == 'x')) {
+            if (event.key == 'x' && editor.cursor != editor.anchor) canvas.clipboard(editor.text.substr(std::min(editor.cursor,editor.anchor),std::max(editor.cursor,editor.anchor) - std::min(editor.cursor,editor.anchor)));
+            return;
+        }
+    }
     editor.reveal = true;
     size_t low = std::min(editor.cursor,editor.anchor),high = std::max(editor.cursor,editor.anchor);
     std::string insertion;
@@ -646,19 +732,34 @@ void PixUIMenuItem::bind_shortcut(int key, int modifiers, const std::string &lab
 
 void PixUIMenuItem::update()
 {
-    if (checked_state) checked = checked_state();
-    if (caption_state) caption = caption_state();
+    if (enabled_state) {
+        bool value = enabled_state();
+        if (enabled != value) repaint = true;
+        enabled = value;
+    }
+    if (checked_state) {
+        bool value = checked_state();
+        if (checked != value) repaint = true;
+        checked = value;
+    }
+    if (caption_state) {
+        std::string value = caption_state();
+        if (caption != value) repaint = true;
+        caption = value;
+    }
 }
 
 void PixUIMenuItem::draw()
 {
+    needs_repaint();
+    repaint = false;
     if (!visible) return;
     bool highlight = enabled && highlighted;
     if (highlight) canvas.fill(bounds,COLOR_SELECTED);
     unsigned ink = !enabled? COLOR_DISABLED : (highlight? COLOR_LIGHT : COLOR_DARK);
     int x = bounds.x + UI_MENU_PADDING,y = bounds.y + (bounds.h - UI_FONT_HEIGHT) / 2;
-    if (checkable) {
-        if (checked) canvas.text(x,y,UI_CHECK_MARK,ink);
+    if (checkable || check_column) {
+        if (checkable && checked) canvas.text(x,y,UI_CHECK_MARK,ink);
         x += UI_MENU_CHECK_WIDTH;
     }
     canvas.text(x,y,caption,ink);
@@ -693,6 +794,7 @@ void PixUIMenu::open(size_t index)
     if (index >= items.size() || !items[index]->enabled || !items[index]->submenu) return;
     bool toggle = selected == int(index) && items[index]->submenu->visible;
     dismiss();
+    repaint = true;
     if (toggle) return;
     selected = int(index);
     items[index]->highlighted = true;
@@ -702,6 +804,7 @@ void PixUIMenu::open(size_t index)
 
 void PixUIMenu::dismiss()
 {
+    if (selected >= 0) repaint = true;
     for (const auto &item : items) {
         item->highlighted = false;
         if (item->submenu) {
@@ -731,8 +834,21 @@ void PixUIMenu::layout()
     }
 }
 
+bool PixUIMenu::needs_repaint()
+{
+    bool changed = PixUIObject::needs_repaint();
+    for (const auto &item : items) {
+        item->update();
+        if (item->needs_repaint()) changed = true;
+        if (item->submenu && item->submenu->visible && item->submenu->needs_repaint()) changed = true;
+    }
+    return changed || repaint;
+}
+
 void PixUIMenu::draw()
 {
+    needs_repaint();
+    repaint = false;
     if (!visible) return;
     layout();
     if (!bar) {
@@ -742,6 +858,8 @@ void PixUIMenu::draw()
     for (const auto &item : items) {
         if (!bar) item->draw();
         else if (item->show_title) {
+            item->needs_repaint();
+            item->repaint = false;
             canvas.fill(item->bounds,item->highlighted? COLOR_SELECTED : COLOR_LIGHT);
             unsigned ink = item->highlighted? COLOR_LIGHT : COLOR_DARK;
             int x = item->bounds.x + std::max(0,(item->bounds.w - int(item->caption.size()) * UI_FONT_WIDTH) / 2);
@@ -751,8 +869,10 @@ void PixUIMenu::draw()
         }
     }
     for (const auto &item : items) {
+        item->repaint = false;
         if (item->submenu && item->submenu->visible) item->submenu->draw();
     }
+    repaint = false;
 }
 
 bool PixUIMenu::event(const PixUIEvent &input)
@@ -781,8 +901,15 @@ bool PixUIMenu::event(const PixUIEvent &input)
             continue;
         }
         if (input.type == PIXUI_MOTION) {
-            if (!bar) item.highlighted = item.enabled;
-            return !bar;
+            if (!item.enabled) return !bar;
+            if (item.submenu && (!bar || opened()) && (selected != int(i) || !item.submenu->visible)) open(i);
+            else if (!bar && !item.submenu && selected != int(i)) {
+                dismiss();
+                selected = int(i);
+            }
+            if (!bar && !item.highlighted) repaint = true;
+            if (!bar) item.highlighted = true;
+            return !bar || opened();
         }
         if (input.button != PIXUI_LEFT_BUTTON) return false;
         if (!item.enabled) return true;
@@ -836,11 +963,13 @@ void PixUIMenu::layout_popup(int x, int y, int width)
 {
     client_width = width;
     int extent = 0;
+    bool check_column = std::any_of(items.begin(),items.end(),[](const auto &item) { return item->checkable; });
     for (const auto &item : items) {
         item->update();
+        item->check_column = check_column;
         int length = int(item->caption.size()) * UI_FONT_WIDTH;
         if (!item->shortcut.empty()) length += UI_MENU_GAP + int(item->shortcut.size()) * UI_FONT_WIDTH;
-        if (item->checkable) length += UI_MENU_CHECK_WIDTH;
+        if (check_column) length += UI_MENU_CHECK_WIDTH;
         extent = std::max(extent,length);
     }
     bounds = {x,y,extent + UI_MENU_PADDING * 2 + UI_MENU_BORDER * 2,int(items.size()) * UI_MENU_ROW + UI_MENU_BORDER * 2};
@@ -896,8 +1025,6 @@ void PixUIForm::add_system_menu()
     heading->activate = system_menu;
     PixUIMenu* popup = menu->child(*heading);
     popup->add("Restore",[this]() { command(PIXUI_RESTORE); });
-    popup->add("Move",[this]() { command(PIXUI_MOVE); });
-    popup->add("Size",[this]() { command(PIXUI_RESIZE); });
     popup->add("Minimize",[this]() { command(PIXUI_MINIMIZE); });
     popup->add("Maximize",[this]() { command(PIXUI_MAXIMIZE); });
     popup->add(UI_CLOSE_TEXT,[this]() { command(PIXUI_CLOSE); })->bind_shortcut(PIXUI_F4,PIXUI_ALT,"Alt+F4");
@@ -933,19 +1060,6 @@ void PixUIForm::command(PixUIWindowCommand value)
         if (close) close();
         return;
     }
-    if (value == PIXUI_MOVE || value == PIXUI_RESIZE) {
-        window_drag = value;
-        drag_x = canvas.pointer_x;
-        drag_y = canvas.pointer_y;
-        drag_window = canvas.window_rect();
-        resize_edge = PIXUI_HIT_BOTTOMRIGHT;
-        if (value == PIXUI_RESIZE) {
-            drag_x = drag_window.w - UI_FRAME;
-            drag_y = drag_window.h - UI_FRAME;
-        }
-        canvas.captured = this;
-        return;
-    }
     canvas.window_command(value,canvas.window_rect());
 }
 
@@ -962,7 +1076,12 @@ void PixUIForm::title_event(int x, int y, bool menu_button)
         if (twice) command(PIXUI_CLOSE);
         else if (system_menu) system_menu();
     } else if (twice) command(canvas.maximized()? PIXUI_RESTORE : PIXUI_MAXIMIZE);
-    else command(PIXUI_MOVE);
+    else if (!canvas.maximized()) {
+        window_drag = PIXUI_MOVE;
+        canvas.pointer_position(drag_x,drag_y);
+        drag_window = canvas.window_rect();
+        canvas.captured = this;
+    }
 }
 
 PixUIHit PixUIForm::hit_test(int x, int y) const
@@ -1014,11 +1133,39 @@ void PixUIForm::unregister_focus(PixUIMemo &memo)
 void PixUIForm::focus_control(PixUIMemo &memo)
 {
     if (modal_blocked) saved_focus = &memo;
-    if (focused) focused->active = false;
+    keyboard_focus = nullptr;
+    if (focused) {
+        focused->active = false;
+        focused->repaint = true;
+    }
     focused = &memo;
+    focused->repaint = true;
     focused->active = true;
     focused->model.reveal = true;
     canvas.text_input(focused->bounds);
+}
+
+void PixUIForm::focus_object(PixUIObject &control)
+{
+    if (keyboard_focus == &control) return;
+    if (focused) {
+        focused->active = false;
+        focused->repaint = true;
+    }
+    keyboard_focus = &control;
+    control.repaint = true;
+}
+
+bool PixUIForm::needs_repaint()
+{
+    prepare_modal();
+    if (PixUIObject::needs_repaint()) return true;
+    if (modal_dialog && modal_dialog->visible && modal_dialog->needs_repaint()) return true;
+    for (const auto &element : elements) {
+        bool changed = element->needs_repaint();
+        if (changed && element->visible && element->layout_visible) return true;
+    }
+    return repaint;
 }
 
 void PixUIForm::layout()
@@ -1031,12 +1178,14 @@ void PixUIForm::present(std::unique_ptr<PixUIDialog> dialog)
     canvas.release_capture();
     if (menu_bar) menu_bar->dismiss();
     if (!modal()) saved_focus = focused;
+    repaint = true;
     pending_dialog = std::move(dialog);
     modal_blocked = true;
 }
 
 void PixUIForm::dismiss_dialog()
 {
+    repaint = true;
     pending_dialog.reset();
     if (modal_dialog) modal_dialog->dismiss();
 }
@@ -1068,6 +1217,8 @@ void PixUIForm::clear()
     system_menu = {};
     modal_blocked = false;
     window_caption.clear();
+    keyboard_focus = nullptr;
+    repaint = true;
     elements.clear();
 }
 
@@ -1080,6 +1231,12 @@ void PixUIForm::remove(PixUIObject &child)
         canvas.release_capture();
         break;
     }
+    for (PixUIObject* owner = keyboard_focus; owner; owner = owner->parent) {
+        if (owner != &child) continue;
+        keyboard_focus = nullptr;
+        break;
+    }
+    repaint = true;
     if (&child == menu_bar) menu_bar = nullptr;
     if (&child == default_button) default_button = nullptr;
     elements.erase(found);
@@ -1092,6 +1249,8 @@ const std::vector<std::unique_ptr<PixUIObject>> &PixUIForm::children() const
 
 void PixUIForm::draw()
 {
+    needs_repaint();
+    repaint = false;
     if (!visible) return;
     prepare_modal();
     layout();
@@ -1103,11 +1262,13 @@ void PixUIForm::draw()
         canvas.set_clip(&effective);
     }
     for (const auto &element : elements) {
+        element->needs_repaint();
         if (element->visible && element->layout_visible && element.get() != menu_bar) element->draw();
     }
     if (menu_bar) menu_bar->draw();
     canvas.set_clip(clipped? &previous : nullptr);
     if (modal_dialog && modal_dialog->visible) modal_dialog->draw();
+    repaint = false;
 }
 
 bool PixUIForm::event(const PixUIEvent &input)
@@ -1122,14 +1283,16 @@ bool PixUIForm::event(const PixUIEvent &input)
             return true;
         }
         if (input.type == PIXUI_MOTION) {
-            PixUIRect rect = canvas.window_rect();
+            int x,y;
+            canvas.pointer_position(x,y);
+            PixUIRect rect = drag_window;
             if (window_drag == PIXUI_MOVE) {
-                rect.x += input.x - drag_x;
-                rect.y += input.y - drag_y;
+                rect.x += x - drag_x;
+                rect.y += y - drag_y;
                 canvas.window_command(PIXUI_MOVE,rect);
             } else {
-                int dx = rect.x + input.x - drag_window.x - drag_x;
-                int dy = rect.y + input.y - drag_window.y - drag_y;
+                int dx = x - drag_x;
+                int dy = y - drag_y;
                 bool left = resize_edge == PIXUI_HIT_LEFT || resize_edge == PIXUI_HIT_TOPLEFT || resize_edge == PIXUI_HIT_BOTTOMLEFT;
                 bool right = resize_edge == PIXUI_HIT_RIGHT || resize_edge == PIXUI_HIT_TOPRIGHT || resize_edge == PIXUI_HIT_BOTTOMRIGHT;
                 bool top = resize_edge == PIXUI_HIT_TOP || resize_edge == PIXUI_HIT_TOPLEFT || resize_edge == PIXUI_HIT_TOPRIGHT;
@@ -1149,13 +1312,15 @@ bool PixUIForm::event(const PixUIEvent &input)
     if (frame && input.type == PIXUI_DOWN && input.button == PIXUI_LEFT_BUTTON) {
         PixUIHit hit = hit_test(input.x,input.y);
         if (hit != PIXUI_HIT_NORMAL && hit != PIXUI_HIT_MOVE) {
-            command(PIXUI_RESIZE);
+            window_drag = PIXUI_RESIZE;
             resize_edge = hit;
-            drag_x = input.x;
-            drag_y = input.y;
+            canvas.pointer_position(drag_x,drag_y);
+            drag_window = canvas.window_rect();
+            canvas.captured = this;
             return true;
         }
     }
+    if (keyboard_focus && keyboard_focus != this && (input.type == PIXUI_KEY || input.type == PIXUI_TEXT) && keyboard_focus->interactive() && keyboard_focus->event(input)) return true;
     if (input.type == PIXUI_KEY && input.key == PIXUI_TAB && !tab_order.empty()) {
         auto found = std::find(tab_order.begin(),tab_order.end(),focused);
         int index = found == tab_order.end()? -1 : int(found - tab_order.begin());
@@ -1171,7 +1336,7 @@ bool PixUIForm::event(const PixUIEvent &input)
             return true;
         }
     }
-    if (default_button && input.type == PIXUI_KEY && input.key == PIXUI_RETURN) return default_button->event(input);
+    if (default_button && !keyboard_focus && input.type == PIXUI_KEY && input.key == PIXUI_RETURN) return default_button->event(input);
     int x = 0,y = 0;
     bool pointer = false;
     if (input.type == PIXUI_DOWN || input.type == PIXUI_UP) {
@@ -1190,7 +1355,10 @@ bool PixUIForm::event(const PixUIEvent &input)
     if (pointer && clip_children && !pixui_inside(clip_client? client : bounds,x,y)) return false;
     // Reverse paint order gives the topmost control first chance to consume input.
     for (auto element = elements.rbegin(); element != elements.rend(); element++) {
-        if (element->get() != menu_bar && (*element)->visible && (*element)->layout_visible && (*element)->enabled && (*element)->event(input)) return true;
+        if (element->get() != menu_bar && (*element)->visible && (*element)->layout_visible && (*element)->enabled && (*element)->event(input)) {
+            (*element)->repaint = true;
+            return true;
+        }
     }
     return PixUIControl::event(input);
 }
@@ -1199,6 +1367,7 @@ void PixUIForm::prepare_modal()
 {
     if (pending_dialog) modal_dialog = std::move(pending_dialog);
     if (modal_dialog && !modal_dialog->visible) {
+        repaint = true;
         modal_dialog.reset();
         if (saved_focus) focus_control(*saved_focus);
         saved_focus = nullptr;
@@ -1297,6 +1466,8 @@ void PixUIGroupBox::layout()
 
 void PixUIGroupBox::draw()
 {
+    needs_repaint();
+    repaint = false;
     if (!visible) return;
     canvas.fill(bounds,color);
     if (border) {
@@ -1313,6 +1484,7 @@ void PixUIGroupBox::draw()
     PixUIForm::draw();
     horizontal.draw();
     vertical.draw();
+    repaint = false;
 }
 
 bool PixUIGroupBox::event(const PixUIEvent &input)
@@ -1370,6 +1542,7 @@ bool PixTab::select(size_t index)
         }
         departing->visible = false;
     }
+    repaint = true;
     active_page = index;
     pages[index]->visible = true;
     layout();
@@ -1394,6 +1567,8 @@ void PixTab::layout()
 
 void PixTab::draw()
 {
+    needs_repaint();
+    repaint = false;
     if (!visible) return;
     canvas.fill(bounds,color);
     PixUIRect body = {bounds.x,bounds.y + UI_TAB_HEIGHT,bounds.w,std::max(0,bounds.h - UI_TAB_HEIGHT)};
@@ -1436,6 +1611,7 @@ void PixTab::draw()
         canvas.set_clip(&effective);
     }
     canvas.set_clip(clipped? &previous : nullptr);
+    repaint = false;
 }
 
 bool PixTab::event(const PixUIEvent &input)
@@ -1491,6 +1667,7 @@ PixUIImageView::PixUIImageView(PixUICanvas &context) : PixUIForm(context)
 
 void PixUIImageView::set_image(void* texture, int width, int height)
 {
+    if (texture != image->texture || width != image->width || height != image->height) repaint = true;
     if (texture != image->texture) {
         image->offset_x = 0;
         image->offset_y = 0;
@@ -1539,6 +1716,23 @@ PixUICarousel::~PixUICarousel()
     }
 }
 
+bool PixUICarousel::event(const PixUIEvent &input)
+{
+    if (!visible || !enabled) return false;
+    PixUIForm* root = this;
+    for (PixUIObject* owner = parent; owner; owner = owner->parent) {
+        if (auto form = dynamic_cast<PixUIForm*>(owner)) root = form;
+    }
+    if (input.type == PIXUI_DOWN && input.button == PIXUI_LEFT_BUTTON && pixui_inside(bounds,input.x,input.y)) root->focus_object(*this);
+    if (input.type == PIXUI_KEY && root->keyboard_focus == this && (input.key == PIXUI_LEFT || input.key == PIXUI_RIGHT)) {
+        if (!count) return true;
+        int next = selection < 0? 0 : std::max(0,std::min(int(count) - 1,selection + (input.key == PIXUI_LEFT? -1 : 1)));
+        if (next != selection && (!selected || selected(size_t(next)))) select(next);
+        return true;
+    }
+    return PixUIForm::event(input);
+}
+
 void PixUICarousel::items_changed(size_t total, bool reset)
 {
     // Releasing before replacement prevents stale resources after workdir changes.
@@ -1546,6 +1740,7 @@ void PixUICarousel::items_changed(size_t total, bool reset)
         if (entry.second.texture && release) release(entry.second.texture);
     }
     cache.clear();
+    repaint = true;
     count = total;
     invalid = true;
     if (reset) {
@@ -1556,7 +1751,14 @@ void PixUICarousel::items_changed(size_t total, bool reset)
 
 void PixUICarousel::select(int index)
 {
-    selection = index >= 0 && size_t(index) < count? index : -1;
+    int next = index >= 0 && size_t(index) < count? index : -1;
+    if (selection != next) repaint = true;
+    selection = next;
+    if (selection >= 0) {
+        int left = selection * cell_width;
+        if (left < offset) offset = left;
+        else if (left + cell_width > offset + bounds.w) offset = left + cell_width - bounds.w;
+    }
     layout();
 }
 
@@ -1575,7 +1777,7 @@ void PixUICarousel::layout()
         last = end;
         invalid = false;
         if (!count) {
-            empty = previews->add<PixUILabel>("No saved images");
+            empty = previews->add<PixUILabel>("No images");
             empty->color = COLOR_DISABLED;
         }
         for (size_t index = first; index < last; index++) {
@@ -1631,6 +1833,8 @@ PixUIProgress::PixUIProgress(PixUICanvas &context) : PixUILabel(context,"Idle")
 
 void PixUIProgress::draw()
 {
+    needs_repaint();
+    repaint = false;
     if (!visible) return;
     canvas.bevel(bounds,true);
     if (busy) {
@@ -1644,13 +1848,36 @@ PixUIStatusBar::PixUIStatusBar(PixUICanvas &context) : PixUIForm(context)
 {
     text_clip = add<PixUIForm>();
     label = text_clip->add<PixUILabel>();
+    count_clip = add<PixUIForm>();
+    count_label = count_clip->add<PixUILabel>();
+    timing_clip = add<PixUIForm>();
+    timing_label = timing_clip->add<PixUILabel>();
     meter = add<PixUIProgress>();
+}
+
+void PixUIStatusBar::set_status(const std::string &message, const std::string &count, const std::string &timing, bool working, float fraction)
+{
+    if (text != message || count_text != count || timing_text != timing || busy != working || progress != fraction) repaint = true;
+    text = message;
+    count_text = count;
+    timing_text = timing;
+    busy = working;
+    progress = fraction;
 }
 
 void PixUIStatusBar::layout()
 {
-    text_clip->bounds = {bounds.x + margin,bounds.y + margin,bounds.w - text_space,UI_LINE_HEIGHT};
-    label->bounds = text_clip->bounds;
+    int top = bounds.y + UI_BORDER_WIDTH;
+    int height = std::max(0,bounds.h - UI_BORDER_WIDTH * 2);
+    count_clip->bounds = {bounds.x + UI_BORDER_WIDTH,top,UI_STATUS_COUNT_WIDTH,height};
+    count_label->bounds = {count_clip->bounds.x + UI_TEXT_PADDING,top + UI_TEXT_PADDING,UI_STATUS_COUNT_WIDTH - UI_TEXT_PADDING * 2,UI_LINE_HEIGHT};
+    count_label->caption = count_text;
+    timing_clip->bounds = {count_clip->bounds.x + count_clip->bounds.w + UI_BORDER_WIDTH,top,UI_STATUS_TIME_WIDTH,height};
+    timing_label->bounds = {timing_clip->bounds.x + UI_TEXT_PADDING,top + UI_TEXT_PADDING,UI_STATUS_TIME_WIDTH - UI_TEXT_PADDING * 2,UI_LINE_HEIGHT};
+    timing_label->caption = timing_text;
+    int left = timing_clip->bounds.x + timing_clip->bounds.w + UI_BORDER_WIDTH;
+    text_clip->bounds = {left,top,std::max(0,bounds.x + bounds.w - progress_offset - UI_BORDER_WIDTH - left),height};
+    label->bounds = {left + UI_TEXT_PADDING,top + UI_TEXT_PADDING,std::max(0,text_clip->bounds.w - UI_TEXT_PADDING * 2),UI_LINE_HEIGHT};
     label->caption = text;
     meter->bounds = {bounds.x + bounds.w - progress_offset,bounds.y + progress_top,progress_width,UI_SCROLLBAR};
     meter->busy = busy;
@@ -1659,9 +1886,15 @@ void PixUIStatusBar::layout()
 
 void PixUIStatusBar::draw()
 {
+    needs_repaint();
+    repaint = false;
     if (!visible) return;
     canvas.fill(bounds,COLOR_FACE);
     canvas.bevel(bounds,true,false);
+    layout();
+    canvas.bevel(count_clip->bounds,true,false);
+    canvas.bevel(timing_clip->bounds,true,false);
+    canvas.bevel(text_clip->bounds,true,false);
     PixUIForm::draw();
 }
 
@@ -1697,6 +1930,8 @@ PixUIList::PixUIList(PixUICanvas &context) : PixUIControl(context),scroll(contex
 
 void PixUIList::draw()
 {
+    needs_repaint();
+    repaint = false;
     if (!visible || !position) return;
     canvas.bevel(bounds,true);
     PixUIRect content = {bounds.x + UI_BORDER_WIDTH,bounds.y + UI_BORDER_WIDTH,bounds.w - UI_SCROLLBAR - UI_BORDER_WIDTH * 2,bounds.h - UI_BORDER_WIDTH * 2};
@@ -1762,11 +1997,25 @@ PixUIDialog::PixUIDialog(PixUICanvas &context, const std::string &caption, const
     cancel_button->activate = [this]() { dismiss(); };
     default_button = accept_button? accept_button : cancel_button;
     default_button->default_action = true;
+    resize_handle = add<PixUILabel>(UI_DIALOG_RESIZE_TEXT);
+    resize_handle->centered = true;
+    resize_handle->visible = false;
 }
 
 void PixUIDialog::center(const PixUIRect &client)
 {
-    bounds = {client.x + (client.w - dialog_width) / 2,client.y + (client.h - dialog_height) / 2,dialog_width,dialog_height};
+    available = client;
+    if (!resizable) bounds = {client.x + (client.w - dialog_width) / 2,client.y + (client.h - dialog_height) / 2,dialog_width,dialog_height};
+    else {
+        dialog_width = std::min(dialog_width,client.w);
+        dialog_height = std::min(dialog_height,client.h);
+        if (!positioned) bounds = {client.x + (client.w - dialog_width) / 2,client.y + (client.h - dialog_height) / 2,dialog_width,dialog_height};
+        bounds.w = dialog_width;
+        bounds.h = dialog_height;
+        bounds.x = std::max(client.x,std::min(bounds.x,client.x + client.w - bounds.w));
+        bounds.y = std::max(client.y,std::min(bounds.y,client.y + client.h - bounds.h));
+        positioned = true;
+    }
     layout();
 }
 
@@ -1781,12 +2030,15 @@ void PixUIDialog::layout()
     PixUIDialogLayout positions = controls();
     cancel_button->bounds = positions.cancel;
     if (accept_button) accept_button->bounds = positions.ok;
+    resize_handle->visible = resizable;
+    resize_handle->bounds = {bounds.x + bounds.w - UI_SCROLLBAR,bounds.y + bounds.h - UI_SCROLLBAR,UI_SCROLLBAR,UI_SCROLLBAR};
 }
 
 void PixUIDialog::dismiss()
 {
     canvas.release_capture();
     visible = false;
+    if (parent) parent->repaint = true;
 }
 
 void PixUIDialog::accept()
@@ -1797,9 +2049,53 @@ void PixUIDialog::accept()
 bool PixUIDialog::event(const PixUIEvent &input)
 {
     if (!visible) return false;
-    if (input.type == PIXUI_KEY && input.key == PIXUI_ESCAPE) dismiss();
-    else PixUIForm::event(input);
+    // A nested selector owns Escape and pointer input until it closes.
+    if (modal()) {
+        PixUIForm::event(input);
+        return true;
+    }
+    if (input.type == PIXUI_KEY && input.key == PIXUI_ESCAPE) {
+        dismiss();
+        return true;
+    }
+    if (resizing && canvas.captured == this) {
+        switch (input.type) {
+        case PIXUI_UP:
+            if (input.button == PIXUI_LEFT_BUTTON) canvas.release_capture();
+            break;
+        case PIXUI_MOTION: {
+            int max_width = std::max(0,available.x + available.w - bounds.x);
+            int max_height = std::max(0,available.y + available.h - bounds.y);
+            dialog_width = std::min(max_width,std::max(minimum_width,resize_width + input.x - resize_x));
+            dialog_height = std::min(max_height,std::max(minimum_height,resize_height + input.y - resize_y));
+            bounds.w = dialog_width;
+            bounds.h = dialog_height;
+            repaint = true;
+            layout();
+            break;
+        }
+        default:
+            break;
+        }
+        return true;
+    }
+    if (resizable && input.type == PIXUI_DOWN && input.button == PIXUI_LEFT_BUTTON && pixui_inside(resize_handle->bounds,input.x,input.y)) {
+        resizing = true;
+        resize_x = input.x;
+        resize_y = input.y;
+        resize_width = bounds.w;
+        resize_height = bounds.h;
+        canvas.captured = this;
+        return true;
+    }
+    PixUIForm::event(input);
     return true;
+}
+
+void PixUIDialog::cancel_capture()
+{
+    resizing = false;
+    PixUIForm::cancel_capture();
 }
 
 PixUIDialogLayout PixUIDialog::controls() const
@@ -1815,7 +2111,8 @@ PixUIDialogLayout PixUIDialog::controls() const
     content.column(result.label.w,UI_FIELD_HEIGHT);
     result.list = content.column(result.label.w,UI_DIRECTORY_ROWS * UI_LINE_HEIGHT + UI_MARGIN);
     result.hint = content.column(result.label.w,UI_LINE_HEIGHT);
-    PixUILayout buttons = {bounds.x + bounds.w - UI_MARGIN - UI_DIALOG_BUTTON_WIDTH * 2 - UI_MARGIN,bounds.y + bounds.h - UI_MARGIN - UI_FIELD_HEIGHT,UI_MARGIN};
+    int right_margin = UI_MARGIN + (resizable? UI_SCROLLBAR : 0);
+    PixUILayout buttons = {bounds.x + bounds.w - right_margin - UI_DIALOG_BUTTON_WIDTH * 2 - UI_MARGIN,bounds.y + bounds.h - UI_MARGIN - UI_FIELD_HEIGHT,UI_MARGIN};
     result.ok = buttons.row(UI_DIALOG_BUTTON_WIDTH,UI_FIELD_HEIGHT);
     result.cancel = buttons.row(UI_DIALOG_BUTTON_WIDTH,UI_FIELD_HEIGHT);
     return result;
@@ -1829,9 +2126,38 @@ PixUIMessageDialog::PixUIMessageDialog(PixUICanvas &context, const std::string &
 
 void PixUIMessageDialog::layout()
 {
+    int longest = 0,column = 0,title_columns = 0;
+    for (size_t offset = 0; offset < message->caption.size(); offset = pixui_next_character(message->caption,offset)) {
+        if (message->caption[offset] == '\n') column = 0;
+        else column++;
+        longest = std::max(longest,column);
+    }
+    for (size_t offset = 0; offset < title.size(); offset = pixui_next_character(title,offset)) title_columns++;
+    int cancel_columns = 0,accept_columns = 0;
+    for (size_t offset = 0; offset < cancel_button->caption.size(); offset = pixui_next_character(cancel_button->caption,offset)) cancel_columns++;
+    for (size_t offset = 0; offset < accept_caption.size(); offset = pixui_next_character(accept_caption,offset)) accept_columns++;
+    int cancel_width = std::max(UI_DIALOG_BUTTON_WIDTH,cancel_columns * UI_FONT_WIDTH + UI_TEXT_PADDING * 2);
+    int accept_width = std::max(UI_DIALOG_BUTTON_WIDTH,accept_columns * UI_FONT_WIDTH + UI_TEXT_PADDING * 2);
+    int button_width = cancel_width + (accept_button? accept_width + UI_MARGIN : 0);
+    int title_width = title_columns * UI_FONT_WIDTH + (UI_TITLE_HEIGHT + UI_CONTENT_INSET) * 2;
+    dialog_width = std::min(UI_DIALOG_WIDTH,std::max(std::max(longest * UI_FONT_WIDTH + UI_MARGIN * 2,title_width),button_width + UI_MARGIN * 2));
+    std::vector<size_t> lines = pixui_editor_lines(message->caption,std::max(1,(dialog_width - UI_MARGIN * 2) / UI_FONT_WIDTH));
+    // The editor adds a caret row after an exactly filled line; message labels need only the text rows.
+    if (lines.size() > 1 && lines.back() == message->caption.size() && message->caption.back() != '\n') lines.pop_back();
+    dialog_height = UI_TITLE_HEIGHT + UI_MARGIN * 3 + int(lines.size()) * UI_LINE_HEIGHT + UI_FIELD_HEIGHT;
+    bounds.x += (bounds.w - dialog_width) / 2;
+    bounds.y += (bounds.h - dialog_height) / 2;
+    bounds.w = dialog_width;
+    bounds.h = dialog_height;
     PixUIDialog::layout();
     PixUIDialogLayout positions = controls();
     message->bounds = {positions.label.x,positions.label.y,positions.label.w,positions.cancel.y - positions.label.y - UI_MARGIN};
+    cancel_button->bounds.x = bounds.x + bounds.w - UI_MARGIN - cancel_width;
+    cancel_button->bounds.w = cancel_width;
+    if (accept_button) {
+        accept_button->bounds.x = cancel_button->bounds.x - UI_MARGIN - accept_width;
+        accept_button->bounds.w = accept_width;
+    }
 }
 
 PixUIAboutDialog::PixUIAboutDialog(PixUICanvas &context, const std::string &caption, void* texture, int width, int height, const std::vector<std::string> &text) : PixUIDialog(context,caption,"",UI_CLOSE_TEXT)
@@ -1859,9 +2185,11 @@ void PixUIAboutDialog::layout()
     }
 }
 
-PixUIFileBrowser::PixUIFileBrowser(PixUICanvas &context, PixUIFileSystem &provider, const std::string &initial) : PixUIDialog(context,"Open file","Open"),filesystem(provider)
+std::string PixUIFileBrowser::last_directory;
+
+PixUIFileBrowser::PixUIFileBrowser(PixUICanvas &context, const std::string &initial) : PixUIDialog(context,"Open file","Open")
 {
-    set_path(initial.empty()? filesystem.last_directory : initial);
+    set_path(initial.empty()? last_directory : initial);
     label = add<PixUILabel>();
     edit = add<PixUIEdit>(path);
     register_focus(*edit);
@@ -1870,7 +2198,7 @@ PixUIFileBrowser::PixUIFileBrowser(PixUICanvas &context, PixUIFileSystem &provid
     browse->activate = [this]() { refresh(); };
     up = add<PixUIButton>("Up");
     up->activate = [this]() {
-        set_path(filesystem.join_path(directory,".."));
+        set_path(path_join(directory,".."));
         refresh();
     };
     list = add<PixUIList>();
@@ -1883,31 +2211,31 @@ PixUIFileBrowser::PixUIFileBrowser(PixUICanvas &context, PixUIFileSystem &provid
 void PixUIFileBrowser::refresh()
 {
     directory = path.text;
-    if (filesystem.path_kind(directory) != PIXUI_PATH_DIRECTORY) directory = filesystem.parent_path(directory);
+    if (path_kind(directory) != PIX_PATH_DIRECTORY) directory = path_parent(directory);
     std::string message;
-    if (!filesystem.read_directory(directory,entries,message)) {
+    if (!directory_list(directory,entries,message)) {
         entries.clear();
         if (error) error(message);
-    } else filesystem.last_directory = filesystem.normalize(directory);
+    } else last_directory = path_normalize(directory);
     position = 0;
 }
 
 void PixUIFileBrowser::accept()
 {
     if (path.text.empty()) return;
-    PixUIPathKind kind = filesystem.path_kind(path.text);
-    if (!dir_selector && kind == PIXUI_PATH_DIRECTORY) {
+    PixPathKind kind = path_kind(path.text);
+    if (!dir_selector && kind == PIX_PATH_DIRECTORY) {
         refresh();
         return;
     }
-    if (dir_selector && kind != PIXUI_PATH_DIRECTORY) {
+    if (dir_selector && kind != PIX_PATH_DIRECTORY) {
         if (error) error(UI_DIRECTORY_ERROR + path.text);
         return;
     }
-    if (kind == PIXUI_PATH_OTHER) return;
+    if (kind == PIX_PATH_OTHER) return;
     if (selected && selected(path.text)) {
-        std::string parent = kind == PIXUI_PATH_DIRECTORY? path.text : filesystem.parent_path(path.text);
-        if (filesystem.path_kind(parent) == PIXUI_PATH_DIRECTORY) filesystem.last_directory = filesystem.normalize(parent);
+        std::string parent = kind == PIX_PATH_DIRECTORY? path.text : path_parent(path.text);
+        if (path_kind(parent) == PIX_PATH_DIRECTORY) last_directory = path_normalize(parent);
         dismiss();
     }
 }
@@ -1948,8 +2276,8 @@ void PixUIFileBrowser::select(size_t index)
 {
     if (index >= entries.size() || (!entries[index].directory && dir_selector)) return;
     bool directory_entry = entries[index].directory;
-    std::string value = filesystem.join_path(directory,entries[index].name);
-    value = filesystem.normalize(value);
+    std::string value = path_join(directory,entries[index].name);
+    value = path_normalize(value);
     set_path(value);
     if (directory_entry) refresh();
 }

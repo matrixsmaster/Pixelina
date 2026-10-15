@@ -8,11 +8,8 @@
 #include "vulkan_ops.h"
 #include <algorithm>
 #include <cmath>
-#include <cstdio>
 #include <cstring>
 #include <numeric>
-#include <sys/resource.h>
-#include <unistd.h>
 
 static bool qwen_image_weight(const PixModelFile &file, const std::string &name, const std::vector<uint64_t> &shape, std::string &error)
 {
@@ -328,7 +325,7 @@ PixTensor qwen_image_diffuse(const PixModelFile &diffuser, const PixTensor &targ
 
 std::vector<float> qwen_image_sigmas(int steps, size_t target_tokens)
 {
-    if (steps < 2 || steps > QWEN_IMAGE_MAX_STEPS || !target_tokens || size_t(steps) > SIZE_MAX / sizeof(float) - 1) return {};
+    if (steps < 2 || steps > PIXELINA_EDIT_MAX_STEPS || !target_tokens || size_t(steps) > SIZE_MAX / sizeof(float) - 1) return {};
     double mu = QWEN_IMAGE_SIGMA_BASE_SHIFT + (double(target_tokens) - QWEN_IMAGE_SIGMA_BASE_LENGTH) * (QWEN_IMAGE_SIGMA_MAX_SHIFT - QWEN_IMAGE_SIGMA_BASE_SHIFT) / (QWEN_IMAGE_SIGMA_MAX_LENGTH - QWEN_IMAGE_SIGMA_BASE_LENGTH);
     float shift = float(std::exp(mu));
     if (!std::isfinite(shift) || shift <= 0) return {};
@@ -400,34 +397,34 @@ bool qwen_image_memory_plan(const PixQwenMemoryInput &input, const PixQwenMemory
         max_reference = std::max(max_reference,latent);
         max_vision = std::max(max_vision,vision);
     }
-    if (!reference_rows || reference_rows % QWEN_VISION_MERGE_PIXELS || input.language_tokens < reference_rows / QWEN_VISION_MERGE_PIXELS) return false;
+    if (reference_rows % QWEN_VISION_MERGE_PIXELS || input.language_tokens < reference_rows / QWEN_VISION_MERGE_PIXELS) return false;
     uint64_t joint;
     if (!qwen_memory_add(input.language_tokens - reference_rows / QWEN_VISION_MERGE_PIXELS,reference_rows,joint) || !qwen_memory_add(joint,target,joint)) return false;
-    uint64_t prepared,patches,features,condition,latents,source,rotary;
-    if (!qwen_memory_multiply(reference_rows,QWEN_VAE_FACTOR * QWEN_VAE_FACTOR * QWEN_VAE_RGBA,prepared) || !qwen_memory_multiply(vision_rows,3 * QWEN_VISION_TEMPORAL_PATCH * QWEN_VISION_PATCH * QWEN_VISION_PATCH * sizeof(float),patches)) return false;
+    uint64_t patches,features,condition,latents,rotary;
+    if (!qwen_memory_multiply(vision_rows,3 * QWEN_VISION_TEMPORAL_PATCH * QWEN_VISION_PATCH * QWEN_VISION_PATCH * sizeof(float),patches)) return false;
     if (!qwen_memory_multiply(vision_rows / QWEN_VISION_MERGE_PIXELS,QWEN_VL_HIDDEN * (QWEN_VISION_DEEPSTACK + 1) * sizeof(float),features) || !qwen_memory_multiply(input.language_tokens,QWEN_VL_HIDDEN * sizeof(float),condition)) return false;
-    if (!qwen_memory_add(reference_rows,target,latents) || !qwen_memory_multiply(latents,QWEN_IMAGE_CHANNELS * sizeof(float),latents) || !qwen_memory_add(input.source_bytes,prepared,source) || !qwen_memory_multiply(joint,QWEN_IMAGE_HEAD_DIM * sizeof(float),rotary)) return false;
+    if (!qwen_memory_add(reference_rows,target,latents) || !qwen_memory_multiply(latents,QWEN_IMAGE_CHANNELS * sizeof(float),latents) || !qwen_memory_multiply(joint,QWEN_IMAGE_HEAD_DIM * sizeof(float),rotary)) return false;
     std::array<uint64_t,QWEN_IMAGE_STAGE_COUNT> activation = {},largest = {},retained = {},scratch = {};
     uint64_t vision_width = std::max(uint64_t(QWEN_VISION_HIDDEN) * QWEN_MEMORY_VISION_MAPS,uint64_t(QWEN_VISION_HIDDEN) * 3 + QWEN_VISION_MLP);
     if (!qwen_memory_multiply(max_vision,vision_width * sizeof(float),activation[QWEN_STAGE_VISION]) || !qwen_memory_multiply(max_vision,QWEN_VISION_MLP * sizeof(float),largest[QWEN_STAGE_VISION])) return false;
     largest[QWEN_STAGE_VISION] = std::max(largest[QWEN_STAGE_VISION],features / (QWEN_VISION_DEEPSTACK + 1));
-    if (!qwen_memory_add(patches,features,retained[QWEN_STAGE_VISION]) || !qwen_memory_add(retained[QWEN_STAGE_VISION],source,retained[QWEN_STAGE_VISION])) return false;
+    if (!qwen_memory_add(patches,features,retained[QWEN_STAGE_VISION])) return false;
     uint64_t learned = QWEN_VISION_POSITIONS * QWEN_VISION_HIDDEN * sizeof(float);
     if (!qwen_memory_add(activation[QWEN_STAGE_VISION],learned,activation[QWEN_STAGE_VISION])) return false;
     uint64_t language_width = std::max(uint64_t(QWEN_VL_HIDDEN) * QWEN_MEMORY_LANGUAGE_ATTN_MAPS + uint64_t(QWEN_VL_KV_HEADS * QWEN_VL_HEAD_DIM) * 2,uint64_t(QWEN_VL_HIDDEN) * QWEN_MEMORY_FFN_MAPS + uint64_t(QWEN_VL_MLP) * 2);
     if (!qwen_memory_multiply(input.language_tokens,language_width * sizeof(float),activation[QWEN_STAGE_LANGUAGE]) || !qwen_memory_multiply(input.language_tokens,QWEN_VL_MLP * sizeof(float),largest[QWEN_STAGE_LANGUAGE])) return false;
-    if (!qwen_memory_add(features,source,retained[QWEN_STAGE_LANGUAGE])) return false;
+    retained[QWEN_STAGE_LANGUAGE] = features;
     // At the first full-resolution encoder residual, three base-width maps coexist with its quarter-size shortcut.
     uint64_t encoder_pixels;
     if (!qwen_memory_multiply(max_reference,QWEN_VAE_FACTOR * QWEN_VAE_FACTOR,encoder_pixels) || !qwen_memory_multiply(encoder_pixels,(QWEN_VAE_ENCODER_BASE * QWEN_MEMORY_ENCODER_BASE_MAPS + QWEN_VAE_ENCODER_BASE / 4) * sizeof(float),activation[QWEN_STAGE_ENCODE])) return false;
-    if (!qwen_memory_multiply(encoder_pixels,QWEN_VAE_ENCODER_BASE * sizeof(float),largest[QWEN_STAGE_ENCODE]) || !qwen_memory_add(condition,latents,retained[QWEN_STAGE_ENCODE]) || !qwen_memory_add(retained[QWEN_STAGE_ENCODE],source,retained[QWEN_STAGE_ENCODE])) return false;
+    if (!qwen_memory_multiply(encoder_pixels,QWEN_VAE_ENCODER_BASE * sizeof(float),largest[QWEN_STAGE_ENCODE]) || !qwen_memory_add(condition,latents,retained[QWEN_STAGE_ENCODE])) return false;
     uint64_t diffuse_width = std::max(uint64_t(QWEN_IMAGE_HIDDEN) * QWEN_MEMORY_DIFFUSION_ATTN_MAPS,uint64_t(QWEN_IMAGE_HIDDEN) * QWEN_MEMORY_FFN_MAPS + uint64_t(QWEN_IMAGE_MLP) * 2);
     if (!qwen_memory_multiply(joint,diffuse_width * sizeof(float),activation[QWEN_STAGE_DIFFUSION]) || !qwen_memory_multiply(joint,QWEN_IMAGE_MLP * sizeof(float),largest[QWEN_STAGE_DIFFUSION])) return false;
-    if (!qwen_memory_add(condition,latents,retained[QWEN_STAGE_DIFFUSION]) || !qwen_memory_add(retained[QWEN_STAGE_DIFFUSION],input.source_bytes,retained[QWEN_STAGE_DIFFUSION]) || !qwen_memory_add(retained[QWEN_STAGE_DIFFUSION],rotary,retained[QWEN_STAGE_DIFFUSION])) return false;
+    if (!qwen_memory_add(condition,latents,retained[QWEN_STAGE_DIFFUSION]) || !qwen_memory_add(retained[QWEN_STAGE_DIFFUSION],rotary,retained[QWEN_STAGE_DIFFUSION])) return false;
     // The final spatial upsample retains its two-base-width shortcut while two convolution maps coexist.
     uint64_t decoder_pixels;
     if (!qwen_memory_multiply(target,QWEN_VAE_FACTOR * QWEN_VAE_FACTOR,decoder_pixels) || !qwen_memory_multiply(decoder_pixels,QWEN_VAE_DECODER_BASE * QWEN_MEMORY_DECODER_BASE_MAPS * sizeof(float),activation[QWEN_STAGE_DECODE])) return false;
-    if (!qwen_memory_multiply(decoder_pixels,QWEN_VAE_DECODER_BASE * 2 * sizeof(float),largest[QWEN_STAGE_DECODE]) || !qwen_memory_multiply(target,QWEN_IMAGE_CHANNELS * sizeof(float),retained[QWEN_STAGE_DECODE]) || !qwen_memory_add(retained[QWEN_STAGE_DECODE],input.source_bytes,retained[QWEN_STAGE_DECODE])) return false;
+    if (!qwen_memory_multiply(decoder_pixels,QWEN_VAE_DECODER_BASE * 2 * sizeof(float),largest[QWEN_STAGE_DECODE]) || !qwen_memory_multiply(target,QWEN_IMAGE_CHANNELS * sizeof(float),retained[QWEN_STAGE_DECODE])) return false;
     uint64_t worker_scores,linear_scratch,quantized_scratch;
     if (!qwen_memory_multiply(std::max({joint,uint64_t(input.language_tokens),max_vision}),input.cpu_threads,worker_scores) || !qwen_memory_multiply(worker_scores,sizeof(float),worker_scores)) return false;
     linear_scratch = uint64_t(COMPUTE_WEIGHT_ROWS) * QWEN_IMAGE_MLP * sizeof(float);
@@ -446,6 +443,11 @@ bool qwen_image_memory_plan(const PixQwenMemoryInput &input, const PixQwenMemory
     for (size_t i = 0; i < QWEN_IMAGE_STAGE_COUNT; i++) {
         PixQwenStageMemory stage;
         stage.stage = PixQwenStage(i);
+        // Text-only generation executes neither vision nor reference encoding.
+        if (input.references.empty() && (i == QWEN_STAGE_VISION || i == QWEN_STAGE_ENCODE)) {
+            result.stages.push_back(stage);
+            continue;
+        }
         stage.retained_bytes = retained[i];
         if (!qwen_memory_add(activation[i],retained[i],stage.activation_bytes)) return false;
         stage.scratch_bytes = scratch[i];
@@ -464,19 +466,6 @@ bool qwen_image_memory_plan(const PixQwenMemoryInput &input, const PixQwenMemory
             stage.packed_cache_bytes = std::min(input.mapped_weights[i],limits.device_bytes - runtime);
             if (!qwen_memory_add(runtime,stage.packed_cache_bytes,stage.device_peak_bytes)) return false;
         }
-        uint64_t host_runtime = limits.device_bytes && !limits.shared_memory? retained[i] : runtime;
-        if (!qwen_memory_add(host_runtime,input.mapped_weights[i],stage.host_peak_bytes)) return false;
-        if (limits.shared_memory && !qwen_memory_add(stage.host_peak_bytes,stage.packed_cache_bytes,stage.host_peak_bytes)) return false;
-        if (stage.host_peak_bytes > limits.host_bytes) {
-            if (!limits.shared_memory || stage.host_peak_bytes - limits.host_bytes >= stage.packed_cache_bytes || input.largest_weight[i] > stage.packed_cache_bytes - (stage.host_peak_bytes - limits.host_bytes)) {
-                error = "Insufficient host memory for Qwen Image stage " + std::to_string(i + 1) + ".";
-                return false;
-            }
-            uint64_t reduce = stage.host_peak_bytes - limits.host_bytes;
-            stage.packed_cache_bytes -= reduce;
-            stage.device_peak_bytes -= reduce;
-            stage.host_peak_bytes = limits.host_bytes;
-        }
         result.stages.push_back(stage);
     }
     if (input.kv_cache) {
@@ -484,21 +473,16 @@ bool qwen_image_memory_plan(const PixQwenMemoryInput &input, const PixQwenMemory
         if (!qwen_memory_multiply(joint - target,uint64_t(2) * QWEN_IMAGE_LAYERS * QWEN_IMAGE_HIDDEN * sizeof(float),cache_bytes) || !qwen_memory_multiply(target,QWEN_IMAGE_HEAD_DIM * sizeof(float),target_rotary) || !qwen_memory_add(cache_bytes,target_rotary,extra)) return false;
         PixQwenStageMemory cached = result.stages[QWEN_STAGE_DIFFUSION];
         // Prefill still runs the full graph while all layers' prefix storage accumulates.
-        if (!qwen_memory_add(cached.activation_bytes,extra,cached.activation_bytes) || !qwen_memory_add(cached.retained_bytes,extra,cached.retained_bytes) || !qwen_memory_add(cached.host_peak_bytes,extra,cached.host_peak_bytes)) return false;
+        if (!qwen_memory_add(cached.activation_bytes,extra,cached.activation_bytes) || !qwen_memory_add(cached.retained_bytes,extra,cached.retained_bytes)) return false;
         uint64_t reduce = 0;
         if (limits.device_bytes) {
             if (!qwen_memory_add(cached.device_peak_bytes,extra,cached.device_peak_bytes)) return false;
             if (cached.device_peak_bytes > limits.device_bytes) reduce = cached.device_peak_bytes - limits.device_bytes;
-            if (limits.shared_memory && cached.host_peak_bytes > limits.host_bytes) reduce = std::max(reduce,cached.host_peak_bytes - limits.host_bytes);
         }
         bool admitted = !limits.device_bytes || (reduce <= cached.packed_cache_bytes && input.largest_weight[QWEN_STAGE_DIFFUSION] <= cached.packed_cache_bytes - reduce);
         if (admitted) {
             cached.packed_cache_bytes -= reduce;
             cached.device_peak_bytes -= reduce;
-            if (limits.shared_memory) cached.host_peak_bytes -= reduce;
-            admitted = cached.host_peak_bytes <= limits.host_bytes;
-        }
-        if (admitted) {
             result.stages[QWEN_STAGE_DIFFUSION] = cached;
             result.kv_cache_bytes = cache_bytes;
         }
@@ -506,41 +490,6 @@ bool qwen_image_memory_plan(const PixQwenMemoryInput &input, const PixQwenMemory
     plan = std::move(result);
     error.clear();
     return true;
-}
-
-static uint64_t qwen_image_host_available()
-{
-    long pages = sysconf(_SC_AVPHYS_PAGES),page_size = sysconf(_SC_PAGESIZE);
-    uint64_t available = 0;
-    if (pages <= 0 || page_size <= 0 || !qwen_memory_multiply(uint64_t(pages),uint64_t(page_size),available)) return 0;
-    FILE* information = std::fopen("/proc/meminfo","r");
-    if (information) {
-        char line[QWEN_IMAGE_MEMORY_LINE];
-        while (std::fgets(line,sizeof(line),information)) {
-            unsigned long long kib;
-            if (std::sscanf(line,"MemAvailable: %llu kB",&kib) != 1) continue;
-            uint64_t bytes;
-            if (qwen_memory_multiply(kib,QWEN_IMAGE_KIB_BYTES,bytes)) available = bytes;
-            break;
-        }
-        std::fclose(information);
-    }
-    const char* limits[] = {"/sys/fs/cgroup/memory.max","/sys/fs/cgroup/memory/memory.limit_in_bytes"};
-    const char* usage[] = {"/sys/fs/cgroup/memory.current","/sys/fs/cgroup/memory/memory.usage_in_bytes"};
-    for (size_t i = 0; i < sizeof(limits) / sizeof(limits[0]); i++) {
-        FILE* file = std::fopen(limits[i],"r");
-        if (!file) continue;
-        unsigned long long limit = 0,used = 0;
-        bool bounded = std::fscanf(file,"%llu",&limit) == 1;
-        std::fclose(file);
-        if (!bounded) continue;
-        file = std::fopen(usage[i],"r");
-        if (!file) continue;
-        bool read = std::fscanf(file,"%llu",&used) == 1;
-        std::fclose(file);
-        if (read) available = std::min(available,uint64_t(limit > used? limit - used : 0));
-    }
-    return available > QWEN_IMAGE_HOST_RESERVE? available - QWEN_IMAGE_HOST_RESERVE : 0;
 }
 
 static uint64_t qwen_image_largest_weight(const PixModelFile &model, PixQwenStage stage)
@@ -570,26 +519,16 @@ PixImage qwen_image_edit(const PixEditSettings &settings, const std::vector<PixI
         report(0,detail);
         return {};
     }
-    if (references.empty()) {
-        report(0,"Open, generate or select a reference image before editing.");
+    if (references.size() > QWEN_IMAGE_MAX_REFERENCES) {
+        report(0,"Too many reference images; the maximum is " + std::to_string(QWEN_IMAGE_MAX_REFERENCES) + ".");
         return {};
     }
     PixQwenMemoryInput memory;
     memory.kv_cache = true;
     memory.target = {size_t(settings.width / QWEN_VAE_FACTOR),size_t(settings.height / QWEN_VAE_FACTOR)};
     memory.cpu_threads = cpu_thread_count();
-    for (const PixImage &reference : references) {
-        if (!image_valid(reference) || !qwen_memory_add(memory.source_bytes,reference.rgb.size(),memory.source_bytes) || !qwen_memory_add(memory.source_bytes,reference.alpha.size(),memory.source_bytes)) return {};
-    }
-    // Retain both the frozen job source and the currently displayed source until handoff.
-    if (!qwen_memory_multiply(memory.source_bytes,2,memory.source_bytes)) return {};
+    for (const PixImage &reference : references) if (!image_valid(reference)) return {};
     PixQwenMemoryLimits limits;
-    limits.host_bytes = qwen_image_host_available();
-    if (memory.source_bytes >= limits.host_bytes) {
-        error = INFERENCE_ERROR_MEMORY;
-        report(0,"Frozen references exceed available host memory.");
-        return {};
-    }
     if (!report(0,"Inspecting Qwen Image model contracts")) {
         error = INFERENCE_ERROR_STOPPED;
         return {};
@@ -613,7 +552,6 @@ PixImage qwen_image_edit(const PixEditSettings &settings, const std::vector<PixI
     language.close();
     vae.close();
     error = INFERENCE_ERROR_SETTINGS;
-    uint64_t prepared_bytes = memory.source_bytes;
     for (const PixImage &reference : references) {
         PixQwenImageShape shape;
         if (!qwen_image_reference_size(reference,settings.reference_resolution,shape)) {
@@ -623,15 +561,6 @@ PixImage qwen_image_edit(const PixEditSettings &settings, const std::vector<PixI
         uint64_t pixels = shape.width * shape.height;
         if (pixels < QWEN_VISION_MIN_PIXELS || pixels > QWEN_VISION_MAX_PIXELS) {
             report(0,"Reference resolution produces a grid outside the vision processor's supported area.");
-            return {};
-        }
-        uint64_t output_bytes,source_bytes,horizontal_bytes,taps,peak;
-        if (!qwen_memory_multiply(pixels,QWEN_VAE_RGBA,output_bytes) || !qwen_memory_multiply(uint64_t(reference.width) * reference.height,QWEN_VAE_RGBA,source_bytes) || !qwen_memory_multiply(shape.width,uint64_t(reference.height) * QWEN_VAE_RGBA,horizontal_bytes)) return {};
-        // Bound separable resize planes, coefficient capacities and allocator overhead before copying pixels.
-        if (!qwen_memory_add(shape.width,shape.height,taps) || !qwen_memory_add(taps,uint64_t(reference.width) + reference.height,taps) || !qwen_memory_multiply(taps,QWEN_IMAGE_RESIZE_TAP_RESERVE,taps)) return {};
-        if (!qwen_memory_add(prepared_bytes,output_bytes,prepared_bytes) || !qwen_memory_add(prepared_bytes,output_bytes,peak) || !qwen_memory_add(peak,source_bytes,peak) || !qwen_memory_add(peak,horizontal_bytes,peak) || !qwen_memory_add(peak,taps,peak) || peak > limits.host_bytes) {
-            error = INFERENCE_ERROR_MEMORY;
-            report(0,"Reference preparation exceeds available host memory.");
             return {};
         }
     }
@@ -651,7 +580,7 @@ PixImage qwen_image_edit(const PixEditSettings &settings, const std::vector<PixI
     for (const PixImage &image : prepared) memory.references.push_back({size_t(image.width / QWEN_VAE_FACTOR),size_t(image.height / QWEN_VAE_FACTOR)});
 #ifdef PIXELINA_WITH_VULKAN
     VulkanSession session;
-    if (settings.backend == PIXELINA_VULKAN && (!session.initialize() || !session.memory_limits(limits.device_bytes,limits.max_buffer_bytes,limits.shared_memory))) {
+    if (settings.backend == PIXELINA_VULKAN && (!session.initialize() || !session.memory_limits(limits.device_bytes,limits.max_buffer_bytes))) {
         error = INFERENCE_ERROR_VULKAN;
         return {};
     }
@@ -692,16 +621,19 @@ PixImage qwen_image_edit(const PixEditSettings &settings, const std::vector<PixI
         return !cancelled;
     };
     error = INFERENCE_ERROR_MODEL;
-    if (!stage(QWEN_STAGE_VISION) || vision.open(settings.vision,false)) return {};
-    PixVisionFeatures features = qwen_vl_vision(vision,input,report);
-    if (features.merged.values.empty()) {
-        error = cancelled? INFERENCE_ERROR_STOPPED : INFERENCE_ERROR_NUMERICAL;
-        return {};
-    }
+    PixVisionFeatures features;
+    if (!prepared.empty()) {
+        if (!stage(QWEN_STAGE_VISION) || vision.open(settings.vision,false)) return {};
+        features = qwen_vl_vision(vision,input,report);
+        if (features.merged.values.empty()) {
+            error = cancelled? INFERENCE_ERROR_STOPPED : INFERENCE_ERROR_NUMERICAL;
+            return {};
+        }
 #ifdef PIXELINA_WITH_VULKAN
-    if (!vulkan_synchronize()) return {};
+        if (!vulkan_synchronize()) return {};
 #endif
-    vision.close();
+        vision.close();
+    }
     input.patches.clear();
     if (!stage(QWEN_STAGE_LANGUAGE) || language.open(settings.encoder,false)) return {};
     PixQwenCondition condition = qwen_vl_language(language,input,std::move(features),report);
@@ -714,8 +646,8 @@ PixImage qwen_image_edit(const PixEditSettings &settings, const std::vector<PixI
 #endif
     language.close();
     input = PixVLInput();
-    if (!stage(QWEN_STAGE_ENCODE) || vae.open(settings.vae,true)) return {};
     std::vector<PixTensor> fixed;
+    if (!prepared.empty() && (!stage(QWEN_STAGE_ENCODE) || vae.open(settings.vae,true))) return {};
     for (size_t i = 0; i < prepared.size(); i++) {
         auto encode_progress = [&](float fraction, const std::string &name) {
             float within = (fraction - QWEN_VAE_ENCODE_BEGIN) / QWEN_VAE_ENCODE_SPAN;
@@ -749,7 +681,7 @@ PixImage qwen_image_edit(const PixEditSettings &settings, const std::vector<PixI
     }
     for (int step = 0; step < settings.steps; step++) {
         auto block_progress = [&](float fraction, const std::string &name) {
-            return report(QWEN_IMAGE_DIFFUSION_BEGIN + QWEN_IMAGE_DIFFUSION_SPAN * (step + fraction) / settings.steps,name);
+            return report(QWEN_IMAGE_DIFFUSION_BEGIN + QWEN_IMAGE_DIFFUSION_SPAN * (step + fraction) / settings.steps,"Step " + std::to_string(step + 1) + "/" + std::to_string(settings.steps) + ": " + name);
         };
         float model_time = (sigmas[size_t(step)] * QWEN_IMAGE_TIME_SCALE) / QWEN_IMAGE_TIME_SCALE;
         PixTensor flow = qwen_image_diffuse(diffuser,target,fixed,condition,layout,model_time,block_progress,plan.kv_cache_bytes? &cache : nullptr);
