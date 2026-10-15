@@ -4,13 +4,14 @@ Pixelina is a self-contained image generation, editing and viewer application wi
 
 Pixelina brings modern image generation capabilities to a nostalgic interface, proving that you don't need flashy UI frameworks to create beautiful art.
 
-## Use cases
+## Features
 
 - **Local text-to-image prototyping**: type a prompt, adjust seed, steps and shift, and generate arbitrarily sized images entirely offline. Reproducibility is guaranteed by seed and settings snapshot.
 - **Live Preview**: Watch generation progress in real-time as diffusion steps complete.
 - **Batch exploration**: keep a working directory with `pixelina.txt` database and generated JPG/PNG files. The carousel provides instant visual history; click to reload any previous generation with its exact prompt and parameters.
 - **Model swapping**: point the diffuser, encoder and VAE fields to alternative files in the same format. Pixelina validates settings before generation and persists the last used models.
-- **Reference-guided editing**: open an existing image and edit it with a prompt and reference guidance using the new Edit mode. Adjust seed, size, steps and reference resolution, add multiple reference images, and regenerate with consistent style or content.
+- **Reference-guided editing**: open an existing image and edit it with a prompt and reference guidance using the Edit mode. Adjust seed, size, steps and reference resolution, add multiple reference images, and regenerate with consistent style or content.
+- **Visual chat**: open the Chat dialog from the Image menu and ask questions about the currently displayed image using Qwen-VL chat with streaming responses, thinking mode support and per-session conversation history. The chat reuses the Edit settings for model selection and can reference the image inline.
 - **Two creative workspaces**: switch between Generate for pure text-to-image and Edit for image-to-image workflows via the settings tabs. Each workspace remembers its own models and parameters.
 - **Open and clear canvas**: open single images directly for editing, or clear the canvas to start fresh without changing the working directory.
 - **Auto-seed**: let Pixelina advance the seed automatically after each generation to explore variations quickly.
@@ -32,7 +33,7 @@ Pixelina also supports Qwen Image 2.1 for editing:
 - **Vision projector**: vision projector GGUF for reference image encoding.
 - **VAE**: Qwen Image 2.1 VAE safetensors with RGBA support.
 
-The application validates model metadata and tensor names at load time. Only the above three model roles are required; Pixelina does not support arbitrary diffusion families.
+The application validates model metadata and tensor names at load time. Only the above model roles are required; Pixelina does not support arbitrary diffusion families.
 
 Tested with both Q5_K and Q8_0 quants.
 
@@ -40,9 +41,9 @@ Tested with both Q5_K and Q8_0 quants.
 
 Pixelina is built around a faithful Windows 3.11 desktop metaphor with system menu, title bar, min/max/close and resizable borders. Controls use 8×8 bitmap font rendering, beveled buttons, faceplate colors and the characteristic 3D bevels of Windows 3.11.
 
-The settings area now has Generate and Edit tabs. Generate keeps the original Z-Image Turbo controls, while Edit exposes seed, size, steps, reference resolution and the four Qwen Image 2.1 model fields. You can open an image from disk, add references, and run edits with F5. The menu adds Open image, Clear and an Auto-seed toggle in Preferences for smoother iteration.
-
 The UI library `pixuilib` is written from scratch with no external GUI toolkit. Rendering is done via SDL2 as a thin canvas adapter, keeping the widget set minimal and portable.
+
+Version 0.3 adds the Chat workflow, refactored UI modules, persistent window and configuration storage, and improved multi-reference handling.
 
 ## Build requirements
 
