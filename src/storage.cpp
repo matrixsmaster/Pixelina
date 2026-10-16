@@ -301,6 +301,53 @@ bool config_save(const std::string &directory, const std::map<std::string,std::s
     return storage_write(path_join(directory,PIXELINA_CONFIG),output.str(),error);
 }
 
+bool bookmarks_load(const std::string &directory, std::vector<std::string> &paths, std::string &error)
+{
+    std::string path = path_join(directory,PIXELINA_BOOKMARKS);
+    FILE* file = std::fopen(path.c_str(),"rb");
+    if (!file) {
+        if (errno == ENOENT) {
+            paths.clear();
+            return true;
+        }
+        error = "Cannot read bookmarks: " + std::string(std::strerror(errno));
+        return false;
+    }
+    std::string text;
+    char buffer[BUFSIZ];
+    size_t count;
+    while ((count = std::fread(buffer,1,sizeof(buffer),file))) text.append(buffer,count);
+    bool failed = std::ferror(file);
+    std::fclose(file);
+    if (failed) {
+        error = "Cannot read bookmarks: " + path;
+        return false;
+    }
+    std::istringstream input(text);
+    std::vector<std::string> parsed;
+    std::string entry;
+    while (std::getline(input,entry)) {
+        if (entry.empty()) continue;
+        std::string actual = path_normalize(entry);
+        if (std::find(parsed.begin(),parsed.end(),actual) == parsed.end()) parsed.push_back(actual);
+    }
+    paths.swap(parsed);
+    return true;
+}
+
+bool bookmarks_save(const std::string &directory, const std::vector<std::string> &paths, std::string &error)
+{
+    std::string text;
+    for (const std::string &path : paths) {
+        if (path.find('\n') != std::string::npos) {
+            error = "Cannot bookmark a filename containing a newline.";
+            return false;
+        }
+        text += path + '\n';
+    }
+    return storage_write(path_join(directory,PIXELINA_BOOKMARKS),text,error);
+}
+
 bool database_load(const std::string &directory, std::vector<PixRecord> &records, std::string &error, const std::string &database)
 {
     std::string path = database.empty()? path_join(directory,PIXELINA_DB) : database;

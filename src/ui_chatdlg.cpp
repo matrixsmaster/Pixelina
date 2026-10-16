@@ -144,31 +144,5 @@ bool PixelinaChatDialog::event(const PixUIEvent &input)
         close();
         return true;
     }
-    if (moving && canvas.captured == this) {
-        if (input.type == PIXUI_UP && input.button == PIXUI_LEFT_BUTTON) canvas.release_capture();
-        else if (input.type == PIXUI_MOTION) {
-            PixUIRect client = parent? parent->bounds : canvas.window_rect();
-            bounds.x = std::max(client.x,std::min(client.x + client.w - bounds.w,bounds.x + input.x - move_x));
-            bounds.y = std::max(client.y,std::min(client.y + client.h - bounds.h,bounds.y + input.y - move_y));
-            move_x = input.x;
-            move_y = input.y;
-            layout();
-            repaint = true;
-        }
-        return true;
-    }
-    if (input.type == PIXUI_DOWN && input.button == PIXUI_LEFT_BUTTON && pixui_inside(title_label->bounds,input.x,input.y) && !pixui_inside(close_button->bounds,input.x,input.y)) {
-        moving = true;
-        move_x = input.x;
-        move_y = input.y;
-        canvas.captured = this;
-        return true;
-    }
     return PixUIDialog::event(input);
-}
-
-void PixelinaChatDialog::cancel_capture()
-{
-    moving = false;
-    PixUIDialog::cancel_capture();
 }

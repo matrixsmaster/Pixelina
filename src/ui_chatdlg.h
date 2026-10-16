@@ -37,11 +37,8 @@ public:
     bool event(const PixUIEvent &input) override;
     bool needs_repaint() override;
     void accept() override;
-    void cancel_capture() override;
 
 private:
-    friend struct PixelinaTest;
-
     PixUIMemo* memo; // owned selectable, read-only conversation log
     PixUIEdit* edit; // owned single-line message input
     PixEditSettings settings; // frozen language, vision, resolution and backend selections
@@ -53,8 +50,6 @@ private:
     std::mutex mutex; // protects streamed bytes and completion fields
     bool worker_done = false; // completion published under mutex
     std::string pending,response,error; // synchronized streamed bytes and final result
-    bool moving = false; // title-bar pointer capture is active
-    int move_x = 0,move_y = 0; // last pointer position during title-bar movement
 
     void close();
     void append(const std::string &text);

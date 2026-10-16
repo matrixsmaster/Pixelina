@@ -47,10 +47,13 @@ void cpu_decode(const unsigned char* data, uint32_t type, size_t count, float* o
     size_t bytes = type == MODEL_Q8_0? MODEL_Q8_BYTES : (type == MODEL_Q5_K? MODEL_Q5_BYTES : MODEL_Q6_BYTES);
     for (size_t base = 0; base < count; base += block,data += bytes) {
         float* decoded = output + base;
-        if (type == MODEL_Q8_0) {
+        switch (type) {
+        case MODEL_Q8_0: {
             float delta = half_float(uint16_t(data[0]) | (uint16_t(data[1]) << 8));
             for (unsigned i = 0; i < MODEL_Q8_BLOCK; i++) decoded[i] = int8_t(data[2 + i]) * delta;
-        } else if (type == MODEL_Q5_K) {
+            break;
+        }
+        case MODEL_Q5_K: {
             float delta = half_float(uint16_t(data[0]) | (uint16_t(data[1]) << 8));
             float minimum = half_float(uint16_t(data[2]) | (uint16_t(data[3]) << 8));
             const unsigned char* scales = data + 4;
@@ -72,7 +75,9 @@ void cpu_decode(const unsigned char* data, uint32_t type, size_t count, float* o
                     decoded[group * MODEL_Q8_BLOCK + i] = delta * scale * q - minimum * min;
                 }
             }
-        } else if (type == MODEL_Q6_K) {
+            break;
+        }
+        case MODEL_Q6_K: {
             float delta = half_float(uint16_t(data[Q6_DELTA_OFFSET]) | (uint16_t(data[Q6_DELTA_OFFSET + 1]) << 8));
             for (unsigned half = 0; half < 2; half++) {
                 const unsigned char* low = data + half * 64;
@@ -87,6 +92,10 @@ void cpu_decode(const unsigned char* data, uint32_t type, size_t count, float* o
                     }
                 }
             }
+            break;
+        }
+        default:
+            return;
         }
     }
 }

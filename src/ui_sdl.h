@@ -9,6 +9,7 @@
 
 #include <SDL.h>
 #include "pixuilib.h"
+#include "storage.h"
 
 #define UI_START_WIDTH 1024
 #define UI_START_HEIGHT 768
@@ -17,9 +18,12 @@
 class PixUISDLCanvas : public PixUICanvas
 {
 public:
+    ~PixUISDLCanvas() override;
+
     void fill(const PixUIRect &rect, unsigned color) override;
     void point(int x, int y, unsigned color) override;
     void image(void* texture, const PixUIRect &rect) override;
+    void set_main_image(const PixImage* source, SDL_Texture* texture);
     bool clip(PixUIRect &rect) const override;
     void set_clip(const PixUIRect* rect) override;
     uint64_t ticks() const override;
@@ -38,6 +42,10 @@ public:
     PixUIRect restored_window; // normal geometry retained across maximizing and minimizing
 
 private:
+    const PixImage* main_image = nullptr; // borrowed current image for Lanczos3 display resizing
+    SDL_Texture* main_texture = nullptr; // borrowed original texture identifying the main image
+    SDL_Texture* scaled_texture = nullptr; // owned Lanczos3 display cache released before the renderer
+    int scaled_width = 0,scaled_height = 0; // cached display dimensions
     unsigned draw_color = 0; // cached renderer draw color
     bool color_valid = false; // renderer color has been set through this adapter
     bool clipped = false; // clipping enabled through this adapter

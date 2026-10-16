@@ -7,6 +7,20 @@
 #include "ui_sdl.h"
 #include <cmath>
 
+PixUISDLCanvas::~PixUISDLCanvas()
+{
+    if (scaled_texture) SDL_DestroyTexture(scaled_texture);
+}
+
+void PixUISDLCanvas::set_main_image(const PixImage* source, SDL_Texture* texture)
+{
+    if (scaled_texture) SDL_DestroyTexture(scaled_texture);
+    scaled_texture = nullptr;
+    scaled_width = scaled_height = 0;
+    main_image = source;
+    main_texture = texture;
+}
+
 void PixUISDLCanvas::set_color(unsigned color)
 {
     if (color_valid && draw_color == color) return;
@@ -30,6 +44,24 @@ void PixUISDLCanvas::point(int x, int y, unsigned color)
 
 void PixUISDLCanvas::image(void* texture, const PixUIRect &rect)
 {
+    if (rect.w <= 0 || rect.h <= 0) return;
+    if (texture == main_texture && main_image && (rect.w != main_image->width || rect.h != main_image->height)) {
+        if (rect.w != scaled_width || rect.h != scaled_height) {
+            if (scaled_texture) SDL_DestroyTexture(scaled_texture);
+            scaled_texture = nullptr;
+            scaled_width = rect.w;
+            scaled_height = rect.h;
+            PixImage resized = image_resize(*main_image,rect.w,rect.h,PIX_IMAGE_LANCZOS,PIX_IMAGE_RGB);
+            if (image_valid(resized)) {
+                scaled_texture = SDL_CreateTexture(renderer,SDL_PIXELFORMAT_RGB24,SDL_TEXTUREACCESS_STATIC,rect.w,rect.h);
+                if (scaled_texture && SDL_UpdateTexture(scaled_texture,nullptr,resized.rgb.data(),rect.w * 3)) {
+                    SDL_DestroyTexture(scaled_texture);
+                    scaled_texture = nullptr;
+                }
+            }
+        }
+        if (scaled_texture) texture = scaled_texture;
+    }
     SDL_Rect target = {rect.x,rect.y,rect.w,rect.h};
     SDL_RenderCopy(renderer,static_cast<SDL_Texture*>(texture),nullptr,&target);
 }
@@ -175,6 +207,9 @@ PixUIEvent PixUISDLCanvas::translate(const SDL_Event &input)
         case SDLK_DOWN:
             result.key = PIXUI_DOWN_KEY;
             break;
+        case SDLK_F2:
+            result.key = PIXUI_F2;
+            break;
         case SDLK_F3:
             result.key = PIXUI_F3;
             break;
@@ -183,6 +218,9 @@ PixUIEvent PixUISDLCanvas::translate(const SDL_Event &input)
             break;
         case SDLK_F5:
             result.key = PIXUI_F5;
+            break;
+        case SDLK_F11:
+            result.key = PIXUI_F11;
             break;
         default:
             result.key = input.key.keysym.sym >= 0 && input.key.keysym.sym < PIXUI_SPECIAL_KEY? input.key.keysym.sym : 0;

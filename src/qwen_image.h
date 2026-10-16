@@ -93,6 +93,7 @@ struct PixQwenMemoryInput {
     std::array<uint64_t,QWEN_IMAGE_STAGE_COUNT> largest_weight = {}; // largest required packed binding by stage
     size_t cpu_threads = 1; // score-row and operator scratch workers
     bool kv_cache = false; // request F32 prefix caching with automatic device budget fallback
+    bool preview = false; // reserve decoding memory while diffusion state remains live
 };
 
 struct PixQwenMemoryLimits {
@@ -122,6 +123,6 @@ PixTensor qwen_image_diffuse(const PixModelFile &diffuser, const PixTensor &targ
 std::vector<float> qwen_image_sigmas(int steps, size_t target_tokens);
 void qwen_image_euler(PixTensor &target, const PixTensor &flow, float sigma, float next_sigma);
 bool qwen_image_memory_plan(const PixQwenMemoryInput &input, const PixQwenMemoryLimits &limits, PixQwenMemoryPlan &plan, std::string &error);
-PixImage qwen_image_edit(const PixEditSettings &settings, const std::vector<PixImage> &references, const std::string &prompt, const InferenceProgress &progress, int &error);
+PixImage qwen_image_edit(const PixEditSettings &settings, const std::vector<PixImage> &references, const std::string &prompt, const InferenceProgress &progress, int &error, const std::function<bool()> &decode_enabled = {}, const InferencePreview &preview = {});
 
 #endif

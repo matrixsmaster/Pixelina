@@ -5,15 +5,201 @@
  * License: MIT
  */
 #include <algorithm>
+#include <ctype.h>
+#include <cstdio>
+#include <cstdlib>
+#include <fstream>
 #include "pixuilib.h"
 #include "os.h"
 #include "../third_party/font8x8_basic.h"
+
+PixUITheme pixui_theme;
+
+static const char* theme_color_names[PIXUI_COLOR_COUNT] = {"COLOR_FACE","COLOR_LIGHT","COLOR_SHADOW","COLOR_DARK","COLOR_TITLE","COLOR_DESKTOP","COLOR_SELECTED","COLOR_DISABLED"};
+static const char* theme_font_names[PIXUI_FONT_COUNT] = {"LABEL","HEADER","TEXT"};
+
+static std::string theme_trim(const std::string &value)
+{
+    size_t first = value.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos) return {};
+    return value.substr(first,value.find_last_not_of(" \t\r\n") - first + 1);
+}
+
+static bool theme_color(const std::string &text, unsigned &color)
+{
+    unsigned red,green,blue;
+    if (std::sscanf(text.c_str(),"%u ,%u ,%u",&red,&green,&blue) != 3) return false;
+    color = (uint32_t(uint8_t(red)) << (UI_COLOR_CHANNEL_BITS * 2)) | (uint32_t(uint8_t(green)) << UI_COLOR_CHANNEL_BITS) | uint8_t(blue);
+    return true;
+}
+
+static bool theme_font(std::map<std::string,std::string> &values, const std::string &name, PixUIBitmapFont &font)
+{
+    int dimensions[4];
+    const char* suffixes[] = {UI_THEME_FONT_WIDTH,UI_THEME_FONT_HEIGHT,UI_THEME_FONT_START,UI_THEME_FONT_END};
+    for (size_t i = 0; i < sizeof(suffixes) / sizeof(suffixes[0]); i++) {
+        auto entry = values.find(name + suffixes[i]);
+        if (entry == values.end()) return false;
+        dimensions[i] = std::atoi(entry->second.c_str());
+        values.erase(entry);
+    }
+    if (dimensions[0] < 1 || dimensions[0] > UI_FONT_MAX_WIDTH || dimensions[1] < 1 || dimensions[1] > UI_FONT_MAX_HEIGHT || dimensions[2] < 0 || dimensions[3] >= UI_FONT_GLYPHS || dimensions[2] > dimensions[3]) return false;
+    font.width = dimensions[0];
+    font.height = dimensions[1];
+    font.rows.resize(size_t(UI_FONT_GLYPHS) * font.height);
+    for (int ch = dimensions[2]; ch <= dimensions[3]; ch++) {
+        auto entry = values.find(name + UI_THEME_FONT_LINE + std::to_string(ch));
+        if (entry == values.end()) continue;
+        const char* next = entry->second.c_str();
+        for (int row = 0; row < font.height; row++) {
+            char* end;
+            font.rows[size_t(ch) * font.height + row] = std::strtoul(next,&end,0);
+            next = *end == ','? end + 1 : end;
+        }
+        values.erase(entry);
+    }
+    return true;
+}
+
+static bool theme_style(std::map<std::string,std::string> &values, const std::map<std::string,std::shared_ptr<PixUIBitmapFont>> &sources, PixUIFont &font, PixUIFontRole role)
+{
+    std::string key = std::string(UI_THEME_FONT_PREFIX) + theme_font_names[role];
+    auto entry = values.find(key);
+    if (entry != values.end()) {
+        std::string name = entry->second;
+        values.erase(entry);
+        if (name != UI_THEME_DEFAULT_FONT) {
+            if (name.empty()) return false;
+            for (char &ch : name) {
+                if (!isalnum((unsigned char)ch) && ch != '_') return false;
+                ch = toupper((unsigned char)ch);
+            }
+            auto source = sources.find(name);
+            if (source == sources.end()) return false;
+            font.bitmap = source->second;
+        }
+    }
+    int source_width = font.bitmap? font.bitmap->width : UI_DEFAULT_FONT_WIDTH;
+    int source_height = font.bitmap? font.bitmap->height : UI_DEFAULT_FONT_HEIGHT;
+    font.width = source_width;
+    font.height = source_height;
+    entry = values.find(key + UI_THEME_SIZE_SUFFIX);
+    if (entry != values.end()) {
+        font.height = std::atoi(entry->second.c_str());
+        if (font.height < 1 || font.height > UI_FONT_MAX_HEIGHT) return false;
+        font.width = std::max(1,(source_width * font.height + source_height / 2) / source_height);
+        if (font.width > UI_FONT_MAX_SCALED_WIDTH) return false;
+        values.erase(entry);
+    }
+    entry = values.find(key + UI_THEME_COLOR_SUFFIX);
+    if (entry != values.end()) {
+        if (!theme_color(entry->second,font.color)) return false;
+        values.erase(entry);
+    }
+    if (font.height == source_height) return true;
+    // Scale once at load time; native-size fonts render directly from their source rows.
+    font.cache.resize(size_t(UI_FONT_GLYPHS) * font.width * font.height);
+    for (int ch = 0; ch < UI_FONT_GLYPHS; ch++) {
+        for (int y = 0; y < font.height; y++) {
+            int source_y = y * source_height / font.height;
+            uint32_t bits = font.bitmap? font.bitmap->rows[size_t(ch) * source_height + source_y] : uint8_t(font8x8_basic[ch][source_y]);
+            for (int x = 0; x < font.width; x++) font.cache[(size_t(ch) * font.height + y) * font.width + x] = (bits >> (x * source_width / font.width)) & 1;
+        }
+    }
+    return true;
+}
+
+bool pixui_load_theme(const std::string &path, std::string &error)
+{
+    PixUITheme theme;
+    if (path.empty()) {
+        pixui_theme = std::move(theme);
+        return true;
+    }
+    std::ifstream input(path);
+    if (!input) {
+        error = "Cannot read theme: " + path;
+        return false;
+    }
+    std::map<std::string,std::string> values;
+    std::string line;
+    bool valid = true;
+    while (std::getline(input,line)) {
+        line = theme_trim(line.substr(0,line.find(';')));
+        if (line.empty()) continue;
+        size_t equal = line.find('=');
+        if (equal == std::string::npos || !equal || !values.emplace(theme_trim(line.substr(0,equal)),theme_trim(line.substr(equal + 1))).second) {
+            valid = false;
+            break;
+        }
+    }
+    for (int i = 0; valid && i < PIXUI_COLOR_COUNT; i++) {
+        auto entry = values.find(theme_color_names[i]);
+        if (entry == values.end()) continue;
+        valid = theme_color(entry->second,theme.colors[i]);
+        values.erase(entry);
+    }
+    std::map<std::string,std::shared_ptr<PixUIBitmapFont>> sources;
+    std::vector<std::string> names;
+    const std::string suffix = UI_THEME_FONT_HEIGHT;
+    for (const auto &entry : values) {
+        if (entry.first.size() > suffix.size() && entry.first.compare(entry.first.size() - suffix.size(),suffix.size(),suffix) == 0) names.push_back(entry.first.substr(0,entry.first.size() - suffix.size()));
+    }
+    for (const auto &name : names) {
+        if (!valid) break;
+        auto bitmap = std::make_shared<PixUIBitmapFont>();
+        valid = theme_font(values,name,*bitmap);
+        if (valid) sources.emplace(name,std::move(bitmap));
+    }
+    for (int i = 0; valid && i < PIXUI_FONT_COUNT; i++) {
+        theme.fonts[i].color = theme.colors[i == PIXUI_FONT_HEADER? PIXUI_COLOR_LIGHT : PIXUI_COLOR_DARK];
+        valid = theme_style(values,sources,theme.fonts[i],static_cast<PixUIFontRole>(i));
+    }
+    if (!valid || !values.empty() || input.bad()) {
+        error = "Invalid or unreadable theme: " + path;
+        return false;
+    }
+    pixui_theme = std::move(theme);
+    return true;
+}
 
 static size_t previous_character(const std::string &text, size_t offset)
 {
     if (!offset) return 0;
     offset--;
     while (offset && (static_cast<unsigned char>(text[offset]) & UI_UTF8_MASK) == UI_UTF8_CONTINUATION) offset--;
+    return offset;
+}
+
+static size_t previous_word(const std::string &text, size_t offset)
+{
+    while (offset) {
+        size_t previous = previous_character(text,offset);
+        unsigned char ch = (unsigned char)text[previous];
+        if (!isspace(ch) && !ispunct(ch)) break;
+        offset = previous;
+    }
+    while (offset) {
+        size_t previous = previous_character(text,offset);
+        unsigned char ch = (unsigned char)text[previous];
+        if (isspace(ch) || ispunct(ch)) break;
+        offset = previous;
+    }
+    return offset;
+}
+
+static size_t next_word(const std::string &text, size_t offset)
+{
+    while (offset < text.size()) {
+        unsigned char ch = (unsigned char)text[offset];
+        if (isspace(ch) || ispunct(ch)) break;
+        offset = pixui_next_character(text,offset);
+    }
+    while (offset < text.size()) {
+        unsigned char ch = (unsigned char)text[offset];
+        if (!isspace(ch) && !ispunct(ch)) break;
+        offset = pixui_next_character(text,offset);
+    }
     return offset;
 }
 
@@ -33,44 +219,47 @@ PixUIRect PixUILayout::column(int width, int height)
 
 void PixUICanvas::bevel(const PixUIRect &rect, bool inset, bool background)
 {
-    if (background) fill(rect,COLOR_FACE);
-    unsigned upper = inset? COLOR_DARK : COLOR_LIGHT;
-    unsigned lower = inset? COLOR_SHADOW : COLOR_DARK;
+    if (background) fill(rect,UI_COLOR_FACE);
+    unsigned upper = inset? UI_COLOR_DARK : UI_COLOR_LIGHT;
+    unsigned lower = inset? UI_COLOR_SHADOW : UI_COLOR_DARK;
     fill({rect.x,rect.y,rect.w,1},upper);
     fill({rect.x,rect.y,1,rect.h},upper);
     fill({rect.x,rect.y + rect.h - 1,rect.w,1},lower);
     fill({rect.x + rect.w - 1,rect.y,1,rect.h},lower);
 }
 
-void PixUICanvas::text(int x, int y, const std::string &value, unsigned color)
+void PixUICanvas::text(int x, int y, const std::string &value, unsigned color, PixUIFontRole role)
 {
+    const PixUIFont &font = pixui_theme.fonts[role];
     int origin = x;
     for (size_t i = 0; i < value.size(); i = pixui_next_character(value,i)) {
         unsigned char ch = value[i];
         if (ch == '\n') {
-            y += UI_LINE_HEIGHT;
+            y += font.height + UI_FONT_LINE_GAP;
             x = origin;
             continue;
         }
         if (ch >= UI_FONT_GLYPHS || ch < ' ') ch = '?';
-        for (int row = 0; row < UI_FONT_HEIGHT; row++) {
-            unsigned char bits = font8x8_basic[ch][row];
-            for (int column = 0; column < UI_FONT_WIDTH; column++) {
-                if (bits & (1 << column)) point(x + column,y + row,color);
+        for (int row = 0; row < font.height; row++) {
+            uint32_t bits = 0;
+            if (font.cache.empty()) bits = font.bitmap? font.bitmap->rows[size_t(ch) * font.height + row] : uint8_t(font8x8_basic[ch][row]);
+            for (int column = 0; column < font.width; column++) {
+                bool pixel = font.cache.empty()? (bits & (uint32_t(1) << column)) != 0 : font.cache[(size_t(ch) * font.height + row) * font.width + column] != 0;
+                if (pixel) point(x + column,y + row,color);
             }
         }
-        x += UI_FONT_WIDTH;
+        x += font.width;
     }
 }
 
 void PixUICanvas::button(const PixUIRect &rect, const std::string &label, bool pressed)
 {
-    fill(rect,COLOR_DARK);
+    fill(rect,UI_COLOR_DARK);
     PixUIRect inner = {rect.x + 1,rect.y + 1,rect.w - 2,rect.h - 2};
     bevel(inner,pressed);
     if (!pressed) {
-        fill({inner.x + 1,inner.y + inner.h - 2,inner.w - 2,1},COLOR_SHADOW);
-        fill({inner.x + inner.w - 2,inner.y + 1,1,inner.h - 2},COLOR_SHADOW);
+        fill({inner.x + 1,inner.y + inner.h - 2,inner.w - 2,1},UI_COLOR_SHADOW);
+        fill({inner.x + inner.w - 2,inner.y + 1,1,inner.h - 2},UI_COLOR_SHADOW);
     }
     if (label == UI_CONTROL_UP || label == UI_CONTROL_DOWN || label == UI_CONTROL_LEFT || label == UI_CONTROL_RIGHT) {
         int center = rect.x + rect.w / 2;
@@ -82,14 +271,14 @@ void PixUICanvas::button(const PixUIRect &rect, const std::string &label, bool p
         }
         for (int row = 0; row < UI_ARROW_SIZE; row++) {
             int radius = label == UI_CONTROL_UP || label == UI_CONTROL_LEFT? row : UI_ARROW_SIZE - row - 1;
-            if (horizontal) fill({top + row,center - radius,1,radius * 2 + 1},COLOR_DARK);
-            else fill({center - radius,top + row,radius * 2 + 1,1},COLOR_DARK);
+            if (horizontal) fill({top + row,center - radius,1,radius * 2 + 1},UI_COLOR_DARK);
+            else fill({center - radius,top + row,radius * 2 + 1,1},UI_COLOR_DARK);
         }
     } else if (label == UI_CONTROL_SYSTEM) {
         PixUIRect dash = {rect.x + UI_ARROW_SIZE,rect.y + rect.h / 2 - 1,rect.w - UI_ARROW_SIZE * 2,UI_SYSTEM_BAR_HEIGHT};
-        fill(dash,COLOR_DARK);
-        fill({dash.x + 1,dash.y + 1,dash.w - 2,1},COLOR_LIGHT);
-    } else text(rect.x + std::max(UI_TEXT_PADDING,(rect.w - int(label.size()) * UI_FONT_WIDTH) / 2),rect.y + (rect.h - UI_FONT_HEIGHT) / 2,label,COLOR_DARK);
+        fill(dash,UI_COLOR_DARK);
+        fill({dash.x + 1,dash.y + 1,dash.w - 2,1},UI_COLOR_LIGHT);
+    } else text(rect.x + std::max(UI_TEXT_PADDING,(rect.w - int(label.size()) * UI_FONT_WIDTH) / 2),rect.y + (rect.h - UI_FONT_HEIGHT) / 2,label,pixui_theme.fonts[PIXUI_FONT_LABEL].color);
 }
 
 void PixUICanvas::pointer_position(int &x, int &y) const
@@ -228,9 +417,10 @@ void PixUILabel::draw()
     repaint = false;
     if (!visible) return;
     if (background) canvas.fill(bounds,background_color);
+    const PixUIFont &font = pixui_theme.fonts[font_role];
     std::string text = caption;
     if (wrap) {
-        int columns = std::max(1,bounds.w / UI_FONT_WIDTH);
+        int columns = std::max(1,bounds.w / font.width);
         std::vector<size_t> lines = pixui_editor_lines(caption,columns);
         text.clear();
         for (size_t i = 0; i < lines.size(); i++) {
@@ -241,11 +431,11 @@ void PixUILabel::draw()
     }
     int x = bounds.x,y = bounds.y;
     if (centered) {
-        x += std::max(0,(bounds.w - int(text.size()) * UI_FONT_WIDTH) / 2);
-        y += std::max(0,(bounds.h - UI_FONT_HEIGHT) / 2);
+        x += std::max(0,(bounds.w - int(text.size()) * font.width) / 2);
+        y += std::max(0,(bounds.h - font.height) / 2);
     }
-    canvas.text(x,y,text,color);
-    if (underline) canvas.fill({x,y + UI_FONT_HEIGHT,UI_FONT_WIDTH,1},color);
+    canvas.text(x,y,text,color,font_role);
+    if (underline) canvas.fill({x,y + font.height,font.width,1},color);
 }
 
 PixUIButton::PixUIButton(PixUICanvas &context, const std::string &text) : PixUILabel(context,text)
@@ -320,16 +510,16 @@ void PixUIImage::draw_image(const PixUIRect &rect)
             target.y = rect.y + (rect.h - target.h) / 2;
         }
         canvas.image(texture,target);
-    } else if (!placeholder.empty()) canvas.text(rect.x + UI_LABEL_PADDING,rect.y + UI_LABEL_PADDING,placeholder,COLOR_DISABLED);
+    } else if (!placeholder.empty()) canvas.text(rect.x + UI_LABEL_PADDING,rect.y + UI_LABEL_PADDING,placeholder,UI_COLOR_DISABLED);
     canvas.set_clip(clipped? &previous : nullptr);
 }
 
 bool PixUIImage::event(const PixUIEvent &input)
 {
     if (visible && enabled && input.type == PIXUI_WHEEL && pixui_inside(bounds,input.x,input.y) && !scaled) {
-        if (input.mod & PIXUI_SHIFT) offset_x -= input.wheel_y * wheel_step;
-        else offset_y -= input.wheel_y * wheel_step;
-        offset_x -= input.wheel_x * wheel_step;
+        if (input.mod & PIXUI_SHIFT) offset_x -= input.wheel_y * PIXUI_WHEEL_SCROLL_Y * wheel_step;
+        else offset_y -= input.wheel_y * PIXUI_WHEEL_SCROLL_Y * wheel_step;
+        offset_x -= input.wheel_x * PIXUI_WHEEL_SCROLL_X * wheel_step;
         layout();
         return true;
     }
@@ -358,9 +548,9 @@ void PixUIThumb::draw()
         height = preview.height;
     }
     PixUIRect cell = bounds;
-    canvas.fill(cell,selected? COLOR_SELECTED : COLOR_LIGHT);
+    canvas.fill(cell,selected? UI_COLOR_SELECTED : UI_COLOR_LIGHT);
     draw_image({cell.x + UI_TEXT_PADDING,cell.y + UI_CONTENT_INSET,cell.w - UI_TEXT_PADDING * 2,cell.h - UI_LINE_HEIGHT - UI_CONTENT_INSET});
-    canvas.text(cell.x + UI_CONTENT_INSET,cell.y + cell.h - UI_LINE_HEIGHT,caption,selected? COLOR_LIGHT : COLOR_DARK);
+    canvas.text(cell.x + UI_CONTENT_INSET,cell.y + cell.h - UI_LINE_HEIGHT,caption,selected? UI_COLOR_LIGHT : pixui_theme.fonts[PIXUI_FONT_LABEL].color);
 }
 
 PixUIScrollbar::PixUIScrollbar(PixUICanvas &context) : PixUIControl(context)
@@ -482,7 +672,7 @@ bool PixUIMemo::event(const PixUIEvent &input)
     if (multiline && input.type == PIXUI_WHEEL) {
         int x = input.x,y = input.y;
         if (pixui_inside(bounds,x,y)) {
-            model.scroll = std::max(0,std::min(std::max(0,scroll.total - scroll.page),model.scroll - input.wheel_y * UI_WHEEL_LINES));
+            model.scroll = std::max(0,std::min(std::max(0,scroll.total - scroll.page),model.scroll - input.wheel_y * PIXUI_WHEEL_SCROLL_Y * UI_WHEEL_LINES));
             model.reveal = false;
             return true;
         }
@@ -504,8 +694,8 @@ bool PixUIMemo::event(const PixUIEvent &input)
 void PixUIMemo::layout()
 {
     scroll.bounds = {bounds.x + bounds.w - UI_CONTENT_INSET - UI_SCROLLBAR,bounds.y + 1,UI_SCROLLBAR,bounds.h - 2};
-    scroll.page = std::max(1,(bounds.h - UI_CONTENT_INSET * 2) / UI_LINE_HEIGHT);
-    scroll.total = int(pixui_editor_lines(model.text,std::max(1,(bounds.w - UI_CONTENT_INSET * 2 - UI_SCROLLBAR) / UI_FONT_WIDTH)).size());
+    scroll.page = std::max(1,(bounds.h - UI_CONTENT_INSET * 2) / UI_TEXT_LINE_HEIGHT);
+    scroll.total = int(pixui_editor_lines(model.text,std::max(1,(bounds.w - UI_CONTENT_INSET * 2 - UI_SCROLLBAR) / UI_TEXT_WIDTH)).size());
     scroll.visible = visible && multiline;
     scroll.enabled = enabled;
 }
@@ -575,14 +765,16 @@ void PixUIMemo::edit(const PixUIEvent &event)
             size_t target = editor.cursor;
             switch (key) {
             case PIXUI_LEFT:
-                target = !shift && low != high? low : previous_character(editor.text,target);
+                if (!shift && low != high) target = low;
+                else target = control? previous_word(editor.text,target) : previous_character(editor.text,target);
                 break;
             case PIXUI_RIGHT:
-                target = !shift && low != high? high : pixui_next_character(editor.text,target);
+                if (!shift && low != high) target = high;
+                else target = control? next_word(editor.text,target) : pixui_next_character(editor.text,target);
                 break;
             default:
                 if (multiline && !control) {
-                    int columns = std::max(1,(area.w - UI_CONTENT_INSET * 2 - UI_SCROLLBAR) / UI_FONT_WIDTH);
+                    int columns = std::max(1,(area.w - UI_CONTENT_INSET * 2 - UI_SCROLLBAR) / UI_TEXT_WIDTH);
                     std::vector<size_t> lines = pixui_editor_lines(editor.text,columns);
                     int line = int(std::upper_bound(lines.begin(),lines.end(),target) - lines.begin()) - 1;
                     size_t end = line + 1 < int(lines.size())? lines[line + 1] : editor.text.size();
@@ -631,12 +823,12 @@ void PixUIMemo::draw_editor()
     }
     canvas.bevel(rect,true);
     PixUIRect content = {rect.x + UI_CONTENT_INSET,rect.y + UI_CONTENT_INSET,rect.w - UI_CONTENT_INSET * 2 - (multiline? UI_SCROLLBAR : 0),rect.h - UI_CONTENT_INSET * 2};
-    int columns = std::max(1,content.w / UI_FONT_WIDTH);
+    int columns = std::max(1,content.w / UI_TEXT_WIDTH);
     std::vector<size_t> lines = multiline? pixui_editor_lines(editor.text,columns) : std::vector<size_t>{0};
     int caret_line = int(std::upper_bound(lines.begin(),lines.end(),editor.cursor) - lines.begin()) - 1;
     int caret_column = 0;
     for (size_t offset = lines[caret_line]; offset < editor.cursor; offset = pixui_next_character(editor.text,offset)) caret_column++;
-    int visible = std::max(1,content.h / UI_LINE_HEIGHT);
+    int visible = std::max(1,content.h / UI_TEXT_LINE_HEIGHT);
     editor.scroll = std::max(0,std::min(editor.scroll,std::max(0,int(lines.size()) - visible)));
     if (multiline) editor.horizontal = 0;
     else editor.scroll = 0;
@@ -648,10 +840,10 @@ void PixUIMemo::draw_editor()
             if (caret_column < editor.horizontal) editor.horizontal = caret_column;
             if (caret_column >= editor.horizontal + columns) editor.horizontal = caret_column - columns + 1;
         }
-        PixUIRect caret = {content.x + (caret_column - editor.horizontal) * UI_FONT_WIDTH,content.y + (caret_line - editor.scroll) * UI_LINE_HEIGHT,UI_FONT_WIDTH,UI_LINE_HEIGHT};
+        PixUIRect caret = {content.x + (caret_column - editor.horizontal) * UI_TEXT_WIDTH,content.y + (caret_line - editor.scroll) * UI_TEXT_LINE_HEIGHT,UI_TEXT_WIDTH,UI_TEXT_LINE_HEIGHT};
         canvas.text_input(caret);
     }
-    canvas.fill(content,COLOR_LIGHT);
+    canvas.fill(content,UI_COLOR_LIGHT);
     PixUIRect previous,effective = content;
     bool clipped = canvas.clip(previous);
     if (clipped) pixui_intersect(content,previous,effective);
@@ -661,15 +853,15 @@ void PixUIMemo::draw_editor()
         int column = 0;
         for (size_t offset = lines[line]; offset < end; offset = pixui_next_character(editor.text,offset)) {
             if (editor.text[offset] == '\n') break;
-            int x = content.x + (column - editor.horizontal) * UI_FONT_WIDTH;
-            int y = content.y + (line - editor.scroll) * UI_LINE_HEIGHT;
+            int x = content.x + (column - editor.horizontal) * UI_TEXT_WIDTH;
+            int y = content.y + (line - editor.scroll) * UI_TEXT_LINE_HEIGHT;
             bool selection = offset >= std::min(editor.cursor,editor.anchor) && offset < std::max(editor.cursor,editor.anchor);
-            if (selection) canvas.fill({x,y,UI_FONT_WIDTH,UI_LINE_HEIGHT},COLOR_SELECTED);
-            canvas.text(x,y + UI_CONTENT_INSET,editor.text.substr(offset,pixui_next_character(editor.text,offset) - offset),selection? COLOR_LIGHT : COLOR_DARK);
+            if (selection) canvas.fill({x,y,UI_TEXT_WIDTH,UI_TEXT_LINE_HEIGHT},UI_COLOR_SELECTED);
+            canvas.text(x,y + UI_CONTENT_INSET,editor.text.substr(offset,pixui_next_character(editor.text,offset) - offset),selection? UI_COLOR_LIGHT : pixui_theme.fonts[PIXUI_FONT_TEXT].color,PIXUI_FONT_TEXT);
             column++;
         }
     }
-    if (focused && (canvas.ticks() / UI_CARET_PERIOD) % 2 == 0) canvas.fill({content.x + (caret_column - editor.horizontal) * UI_FONT_WIDTH,content.y + (caret_line - editor.scroll) * UI_LINE_HEIGHT,1,UI_LINE_HEIGHT},COLOR_DARK);
+    if (focused && (canvas.ticks() / UI_CARET_PERIOD) % 2 == 0) canvas.fill({content.x + (caret_column - editor.horizontal) * UI_TEXT_WIDTH,content.y + (caret_line - editor.scroll) * UI_TEXT_LINE_HEIGHT,1,UI_TEXT_LINE_HEIGHT},pixui_theme.fonts[PIXUI_FONT_TEXT].color);
     canvas.set_clip(clipped? &previous : nullptr);
 
 }
@@ -678,11 +870,11 @@ void PixUIMemo::place_cursor(int x, int y, int modifiers)
 {
     PixUIEditor &editor = model;
     const PixUIRect &rect = bounds;
-    int columns = std::max(1,(rect.w - UI_CONTENT_INSET * 2 - (multiline? UI_SCROLLBAR : 0)) / UI_FONT_WIDTH);
+    int columns = std::max(1,(rect.w - UI_CONTENT_INSET * 2 - (multiline? UI_SCROLLBAR : 0)) / UI_TEXT_WIDTH);
     std::vector<size_t> lines = multiline? pixui_editor_lines(editor.text,columns) : std::vector<size_t>{0};
-    int wanted_line = multiline? std::max(0,(y - rect.y - UI_CONTENT_INSET) / UI_LINE_HEIGHT + editor.scroll) : 0;
+    int wanted_line = multiline? std::max(0,(y - rect.y - UI_CONTENT_INSET) / UI_TEXT_LINE_HEIGHT + editor.scroll) : 0;
     wanted_line = std::min(wanted_line,int(lines.size()) - 1);
-    int wanted_column = std::max(0,(x - rect.x - UI_CONTENT_INSET + UI_FONT_WIDTH / 2) / UI_FONT_WIDTH + editor.horizontal);
+    int wanted_column = std::max(0,(x - rect.x - UI_CONTENT_INSET + UI_TEXT_WIDTH / 2) / UI_TEXT_WIDTH + editor.horizontal);
     size_t offset = lines[wanted_line];
     size_t end = wanted_line + 1 < int(lines.size())? lines[wanted_line + 1] : editor.text.size();
     for (int column = 0; column < wanted_column && offset < end && editor.text[offset] != '\n'; column++) offset = pixui_next_character(editor.text,offset);
@@ -698,6 +890,21 @@ PixUIEdit::PixUIEdit(PixUICanvas &context, PixUIEditor* state) : PixUIMemo(conte
 
 PixUIEdit::PixUIEdit(PixUICanvas &context, PixUIEditor &state) : PixUIEdit(context,&state)
 {
+}
+
+bool PixUIEdit::event(const PixUIEvent &input)
+{
+    if (visible && enabled && active && !read_only && input.type == PIXUI_KEY) {
+        if (input.key == PIXUI_UP_KEY && increment) {
+            increment();
+            return true;
+        }
+        if (input.key == PIXUI_DOWN_KEY && decrement) {
+            decrement();
+            return true;
+        }
+    }
+    return PixUIMemo::event(input);
 }
 
 PixUIMenuItem::PixUIMenuItem(PixUICanvas &context, const std::string &text) : PixUILabel(context,text)
@@ -755,11 +962,11 @@ void PixUIMenuItem::draw()
     repaint = false;
     if (!visible) return;
     bool highlight = enabled && highlighted;
-    if (highlight) canvas.fill(bounds,COLOR_SELECTED);
-    unsigned ink = !enabled? COLOR_DISABLED : (highlight? COLOR_LIGHT : COLOR_DARK);
+    if (highlight) canvas.fill(bounds,UI_COLOR_SELECTED);
+    unsigned ink = !enabled? UI_COLOR_DISABLED : (highlight? UI_COLOR_LIGHT : pixui_theme.fonts[PIXUI_FONT_LABEL].color);
     int x = bounds.x + UI_MENU_PADDING,y = bounds.y + (bounds.h - UI_FONT_HEIGHT) / 2;
     if (checkable || check_column) {
-        if (checkable && checked) canvas.text(x,y,UI_CHECK_MARK,ink);
+        if (checkable) canvas.text(x,y,checked? UI_CHECK_MARK : UI_UNCHECK_MARK,ink);
         x += UI_MENU_CHECK_WIDTH;
     }
     canvas.text(x,y,caption,ink);
@@ -852,7 +1059,7 @@ void PixUIMenu::draw()
     if (!visible) return;
     layout();
     if (!bar) {
-        canvas.fill(bounds,COLOR_LIGHT);
+        canvas.fill(bounds,UI_COLOR_LIGHT);
         canvas.bevel(bounds,false,false);
     }
     for (const auto &item : items) {
@@ -860,8 +1067,8 @@ void PixUIMenu::draw()
         else if (item->show_title) {
             item->needs_repaint();
             item->repaint = false;
-            canvas.fill(item->bounds,item->highlighted? COLOR_SELECTED : COLOR_LIGHT);
-            unsigned ink = item->highlighted? COLOR_LIGHT : COLOR_DARK;
+            canvas.fill(item->bounds,item->highlighted? UI_COLOR_SELECTED : UI_COLOR_LIGHT);
+            unsigned ink = item->highlighted? UI_COLOR_LIGHT : pixui_theme.fonts[PIXUI_FONT_LABEL].color;
             int x = item->bounds.x + std::max(0,(item->bounds.w - int(item->caption.size()) * UI_FONT_WIDTH) / 2);
             int y = item->bounds.y + (item->bounds.h - UI_FONT_HEIGHT) / 2;
             canvas.text(x,y,item->caption,ink);
@@ -962,16 +1169,15 @@ bool PixUIMenu::contains(int x, int y) const
 void PixUIMenu::layout_popup(int x, int y, int width)
 {
     client_width = width;
-    int extent = 0;
+    int caption_width = 0,shortcut_width = 0;
     bool check_column = std::any_of(items.begin(),items.end(),[](const auto &item) { return item->checkable; });
     for (const auto &item : items) {
         item->update();
         item->check_column = check_column;
-        int length = int(item->caption.size()) * UI_FONT_WIDTH;
-        if (!item->shortcut.empty()) length += UI_MENU_GAP + int(item->shortcut.size()) * UI_FONT_WIDTH;
-        if (check_column) length += UI_MENU_CHECK_WIDTH;
-        extent = std::max(extent,length);
+        caption_width = std::max(caption_width,int(item->caption.size()) * UI_FONT_WIDTH);
+        shortcut_width = std::max(shortcut_width,int(item->shortcut.size()) * UI_FONT_WIDTH);
     }
+    int extent = caption_width + (shortcut_width? UI_MENU_SHORTCUT_GAP + shortcut_width : 0) + (check_column? UI_MENU_CHECK_WIDTH : 0);
     bounds = {x,y,extent + UI_MENU_PADDING * 2 + UI_MENU_BORDER * 2,int(items.size()) * UI_MENU_ROW + UI_MENU_BORDER * 2};
     PixUILayout rows = {bounds.x + UI_MENU_BORDER,bounds.y + UI_MENU_BORDER,0};
     for (const auto &item : items) item->bounds = rows.column(bounds.w - UI_MENU_BORDER * 2,UI_MENU_ROW);
@@ -994,6 +1200,7 @@ void PixUIForm::decorate(const std::string &caption)
     title->pointer = [this](const PixUIEvent &input) { title_event(input.x,input.y); };
     title_clip = add<PixUIForm>();
     title_label = title_clip->add<PixUILabel>(caption);
+    title_label->font_role = PIXUI_FONT_HEADER;
     title_label->centered = true;
     system = add<PixUIButton>(UI_CONTROL_SYSTEM);
     system->pointer = [this](const PixUIEvent &input) { title_event(input.x,input.y,true); };
@@ -1043,11 +1250,11 @@ void PixUIForm::layout_window(const std::string &caption)
     }
     frame->bounds = bounds;
     title->bounds = {UI_FRAME,UI_FRAME,bounds.w - UI_FRAME * 2,UI_WINDOW_TITLE_HEIGHT};
-    title->color = modal_blocked || !active? COLOR_LIGHT : COLOR_TITLE;
+    title->color = modal_blocked || !active? UI_COLOR_LIGHT : UI_COLOR_TITLE;
     title_clip->bounds = {UI_FRAME + UI_WINDOW_TITLE_HEIGHT,UI_FRAME,bounds.w - UI_FRAME * 2 - UI_WINDOW_TITLE_HEIGHT * 3,UI_WINDOW_TITLE_HEIGHT};
     title_label->bounds = title_clip->bounds;
     title_label->caption = caption;
-    title_label->color = modal_blocked || !active? COLOR_DARK : COLOR_LIGHT;
+    title_label->color = modal_blocked || !active? UI_COLOR_DARK : pixui_theme.fonts[PIXUI_FONT_HEADER].color;
     system->bounds = {UI_FRAME,UI_FRAME,UI_WINDOW_TITLE_HEIGHT,UI_WINDOW_TITLE_HEIGHT};
     PixUILayout buttons = {bounds.w - UI_FRAME - UI_WINDOW_TITLE_HEIGHT * 2,UI_FRAME,0};
     minimize->bounds = buttons.row(UI_WINDOW_TITLE_HEIGHT,UI_WINDOW_TITLE_HEIGHT);
@@ -1375,7 +1582,8 @@ void PixUIForm::prepare_modal()
     modal_blocked = modal_dialog != nullptr;
     if (modal_dialog) {
         modal_dialog->active = active;
-        modal_dialog->center(bounds);
+        auto dialog = dynamic_cast<PixUIDialog*>(this);
+        modal_dialog->center(bounds,dialog? dialog->available : bounds);
     }
 }
 
@@ -1472,14 +1680,14 @@ void PixUIGroupBox::draw()
     canvas.fill(bounds,color);
     if (border) {
         PixUIRect frame = {bounds.x + UI_TEXT_PADDING,bounds.y + UI_MARGIN + UI_FONT_HEIGHT / 2,std::max(0,bounds.w - UI_TEXT_PADDING * 2),std::max(0,bounds.h - UI_MARGIN - UI_FONT_HEIGHT / 2 - UI_TEXT_PADDING)};
-        canvas.fill({frame.x,frame.y,frame.w,1},COLOR_DARK);
-        canvas.fill({frame.x,frame.y,1,frame.h},COLOR_DARK);
-        canvas.fill({frame.x,frame.y + frame.h - 1,frame.w,1},COLOR_DARK);
-        canvas.fill({frame.x + frame.w - 1,frame.y,1,frame.h},COLOR_DARK);
+        canvas.fill({frame.x,frame.y,frame.w,1},UI_COLOR_DARK);
+        canvas.fill({frame.x,frame.y,1,frame.h},UI_COLOR_DARK);
+        canvas.fill({frame.x,frame.y + frame.h - 1,frame.w,1},UI_COLOR_DARK);
+        canvas.fill({frame.x + frame.w - 1,frame.y,1,frame.h},UI_COLOR_DARK);
     }
     if (!caption.empty()) {
         canvas.fill({bounds.x + UI_MARGIN - UI_TEXT_PADDING,bounds.y + UI_MARGIN,int(caption.size()) * UI_FONT_WIDTH + UI_TEXT_PADDING * 2,UI_FONT_HEIGHT},color);
-        canvas.text(bounds.x + UI_MARGIN,bounds.y + UI_MARGIN,caption,COLOR_DARK);
+        canvas.text(bounds.x + UI_MARGIN,bounds.y + UI_MARGIN,caption,pixui_theme.fonts[PIXUI_FONT_LABEL].color);
     }
     PixUIForm::draw();
     horizontal.draw();
@@ -1493,8 +1701,8 @@ bool PixUIGroupBox::event(const PixUIEvent &input)
     if (horizontal.event(input) || vertical.event(input)) return true;
     if (PixUIForm::event(input)) return true;
     if ((horizontal.visible || vertical.visible) && input.type == PIXUI_WHEEL && pixui_inside(client,input.x,input.y)) {
-        scroll -= input.wheel_y * wheel_step;
-        offset_x -= input.wheel_x * horizontal.step;
+        scroll -= input.wheel_y * PIXUI_WHEEL_SCROLL_Y * wheel_step;
+        offset_x -= input.wheel_x * PIXUI_WHEEL_SCROLL_X * horizontal.step;
         layout();
         return true;
     }
@@ -1572,10 +1780,10 @@ void PixTab::draw()
     if (!visible) return;
     canvas.fill(bounds,color);
     PixUIRect body = {bounds.x,bounds.y + UI_TAB_HEIGHT,bounds.w,std::max(0,bounds.h - UI_TAB_HEIGHT)};
-    canvas.fill({body.x,body.y,body.w,1},COLOR_DARK);
-    canvas.fill({body.x,body.y,1,body.h},COLOR_DARK);
-    canvas.fill({body.x,body.y + body.h - 1,body.w,1},COLOR_DARK);
-    canvas.fill({body.x + body.w - 1,body.y,1,body.h},COLOR_DARK);
+    canvas.fill({body.x,body.y,body.w,1},UI_COLOR_DARK);
+    canvas.fill({body.x,body.y,1,body.h},UI_COLOR_DARK);
+    canvas.fill({body.x,body.y + body.h - 1,body.w,1},UI_COLOR_DARK);
+    canvas.fill({body.x + body.w - 1,body.y,1,body.h},UI_COLOR_DARK);
     canvas.bevel({body.x + 1,body.y + 1,body.w - 2,body.h - 2},false,false);
     PixUIForm::draw();
     PixUIRect previous,strip = {bounds.x,bounds.y,bounds.w,inset_top},effective = strip;
@@ -1585,27 +1793,27 @@ void PixTab::draw()
     for (size_t i = 0; i < pages.size(); i++) {
         PixUIRect rect = headers[i];
         if (rect.w <= 0) continue;
-        unsigned face = i == active_page? color : COLOR_FACE;
+        unsigned face = i == active_page? color : UI_COLOR_FACE;
         int slope = std::min(UI_TAB_SLOPE,rect.w / 2);
         for (int row = 0; row < slope; row++) {
             canvas.fill({rect.x + slope - row,rect.y + row,rect.w - (slope - row) * 2,1},face);
-            canvas.point(rect.x + slope - row - 1,rect.y + row,COLOR_DARK);
-            if (row) canvas.point(rect.x + slope - row,rect.y + row,COLOR_LIGHT);
-            canvas.point(rect.x + rect.w - slope + row,rect.y + row,COLOR_DARK);
+            canvas.point(rect.x + slope - row - 1,rect.y + row,UI_COLOR_DARK);
+            if (row) canvas.point(rect.x + slope - row,rect.y + row,UI_COLOR_LIGHT);
+            canvas.point(rect.x + rect.w - slope + row,rect.y + row,UI_COLOR_DARK);
         }
         canvas.fill({rect.x,rect.y + slope,rect.w,rect.h - slope},face);
-        canvas.fill({rect.x + slope,rect.y,rect.w - slope * 2,1},COLOR_DARK);
-        canvas.fill({rect.x + slope,rect.y + 1,rect.w - slope * 2,1},COLOR_LIGHT);
-        canvas.fill({rect.x,rect.y + slope,1,rect.h - slope},COLOR_DARK);
-        canvas.fill({rect.x + 1,rect.y + slope,1,rect.h - slope},COLOR_LIGHT);
-        canvas.fill({rect.x + rect.w - 1,rect.y + slope,1,rect.h - slope},COLOR_DARK);
+        canvas.fill({rect.x + slope,rect.y,rect.w - slope * 2,1},UI_COLOR_DARK);
+        canvas.fill({rect.x + slope,rect.y + 1,rect.w - slope * 2,1},UI_COLOR_LIGHT);
+        canvas.fill({rect.x,rect.y + slope,1,rect.h - slope},UI_COLOR_DARK);
+        canvas.fill({rect.x + 1,rect.y + slope,1,rect.h - slope},UI_COLOR_LIGHT);
+        canvas.fill({rect.x + rect.w - 1,rect.y + slope,1,rect.h - slope},UI_COLOR_DARK);
         if (i == active_page) canvas.fill({rect.x + 1,body.y,rect.w - 2,UI_BORDER_WIDTH},color);
         PixUIRect header_clip;
         if (!pixui_intersect(rect,effective,header_clip)) continue;
         canvas.set_clip(&header_clip);
         int label_x = rect.x + std::max(UI_TAB_PADDING,(rect.w - int(pages[i]->title.size()) * UI_FONT_WIDTH) / 2);
         int label_y = rect.y + (rect.h - UI_FONT_HEIGHT) / 2;
-        unsigned ink = selection_enabled && pages[i]->enabled? COLOR_DARK : COLOR_DISABLED;
+        unsigned ink = selection_enabled && pages[i]->enabled? pixui_theme.fonts[PIXUI_FONT_LABEL].color : UI_COLOR_DISABLED;
         canvas.text(label_x,label_y,pages[i]->title,ink);
         if (i == active_page) canvas.text(label_x + 1,label_y,pages[i]->title,ink);
         canvas.set_clip(&effective);
@@ -1697,6 +1905,13 @@ void PixUIImageView::layout()
     vertical->visible = !scaled;
 }
 
+void PixUIImageView::draw()
+{
+    if (!visible) return;
+    canvas.fill(bounds,UI_COLOR_LIGHT);
+    PixUIForm::draw();
+}
+
 PixUICarousel::PixUICarousel(PixUICanvas &context) : PixUIForm(context)
 {
     previews = add<PixUIForm>();
@@ -1704,7 +1919,7 @@ PixUICarousel::PixUICarousel(PixUICanvas &context) : PixUIForm(context)
     scrollbar->position = &offset;
     scrollbar->step = cell_width;
     previews->wheel = [this](const PixUIEvent &input) {
-        offset -= (input.wheel_y + input.wheel_x) * cell_width;
+        offset -= (input.wheel_y * PIXUI_WHEEL_SCROLL_Y + input.wheel_x * PIXUI_WHEEL_SCROLL_X) * cell_width;
         layout();
     };
 }
@@ -1778,7 +1993,7 @@ void PixUICarousel::layout()
         invalid = false;
         if (!count) {
             empty = previews->add<PixUILabel>("No images");
-            empty->color = COLOR_DISABLED;
+            empty->color = UI_COLOR_DISABLED;
         }
         for (size_t index = first; index < last; index++) {
             PixUIThumb* preview = previews->add<PixUIThumb>();
@@ -1839,9 +2054,9 @@ void PixUIProgress::draw()
     canvas.bevel(bounds,true);
     if (busy) {
         float complete = std::max(0.0f,std::min(1.0f,progress));
-        canvas.fill({bounds.x + UI_BORDER_WIDTH,bounds.y + UI_BORDER_WIDTH,int((bounds.w - UI_BORDER_WIDTH * 2) * complete),bounds.h - UI_BORDER_WIDTH * 2},COLOR_TITLE);
-        canvas.text(bounds.x + UI_LABEL_PADDING,bounds.y + UI_TEXT_PADDING,std::to_string(int(complete * UI_PERCENT_SCALE)) + "%",COLOR_LIGHT);
-    } else canvas.text(bounds.x + UI_LABEL_PADDING,bounds.y + UI_TEXT_PADDING,caption,COLOR_DARK);
+        canvas.fill({bounds.x + UI_BORDER_WIDTH,bounds.y + UI_BORDER_WIDTH,int((bounds.w - UI_BORDER_WIDTH * 2) * complete),bounds.h - UI_BORDER_WIDTH * 2},UI_COLOR_TITLE);
+        canvas.text(bounds.x + UI_LABEL_PADDING,bounds.y + UI_TEXT_PADDING,std::to_string(int(complete * UI_PERCENT_SCALE)) + "%",UI_COLOR_LIGHT);
+    } else canvas.text(bounds.x + UI_LABEL_PADDING,bounds.y + UI_TEXT_PADDING,caption,pixui_theme.fonts[PIXUI_FONT_LABEL].color);
 }
 
 PixUIStatusBar::PixUIStatusBar(PixUICanvas &context) : PixUIForm(context)
@@ -1879,7 +2094,7 @@ void PixUIStatusBar::layout()
     text_clip->bounds = {left,top,std::max(0,bounds.x + bounds.w - progress_offset - UI_BORDER_WIDTH - left),height};
     label->bounds = {left + UI_TEXT_PADDING,top + UI_TEXT_PADDING,std::max(0,text_clip->bounds.w - UI_TEXT_PADDING * 2),UI_LINE_HEIGHT};
     label->caption = text;
-    meter->bounds = {bounds.x + bounds.w - progress_offset,bounds.y + progress_top,progress_width,UI_SCROLLBAR};
+    meter->bounds = {bounds.x + bounds.w - progress_offset,bounds.y + progress_top,progress_width,UI_FONT_HEIGHT + UI_TEXT_PADDING * 2};
     meter->busy = busy;
     meter->progress = progress;
 }
@@ -1889,7 +2104,7 @@ void PixUIStatusBar::draw()
     needs_repaint();
     repaint = false;
     if (!visible) return;
-    canvas.fill(bounds,COLOR_FACE);
+    canvas.fill(bounds,UI_COLOR_FACE);
     canvas.bevel(bounds,true,false);
     layout();
     canvas.bevel(count_clip->bounds,true,false);
@@ -1935,12 +2150,12 @@ void PixUIList::draw()
     if (!visible || !position) return;
     canvas.bevel(bounds,true);
     PixUIRect content = {bounds.x + UI_BORDER_WIDTH,bounds.y + UI_BORDER_WIDTH,bounds.w - UI_SCROLLBAR - UI_BORDER_WIDTH * 2,bounds.h - UI_BORDER_WIDTH * 2};
-    canvas.fill(content,COLOR_LIGHT);
+    canvas.fill(content,UI_COLOR_LIGHT);
     PixUIRect previous,effective = content;
     bool clipped = canvas.clip(previous);
     if (!clipped || pixui_intersect(content,previous,effective)) {
         canvas.set_clip(&effective);
-        for (int row = 0; row < page && row + *position < int(count); row++) canvas.text(bounds.x + UI_LABEL_PADDING,bounds.y + UI_TEXT_PADDING + row * UI_LINE_HEIGHT,item? item(size_t(row + *position)) : "",COLOR_DARK);
+        for (int row = 0; row < page && row + *position < int(count); row++) canvas.text(bounds.x + UI_LABEL_PADDING,bounds.y + UI_TEXT_PADDING + row * UI_LINE_HEIGHT,item? item(size_t(row + *position)) : "",pixui_theme.fonts[PIXUI_FONT_LABEL].color);
         canvas.set_clip(clipped? &previous : nullptr);
     }
     layout();
@@ -1954,7 +2169,7 @@ bool PixUIList::event(const PixUIEvent &input)
     if (input.type == PIXUI_WHEEL) {
         int x = input.x,y = input.y;
         if (pixui_inside(bounds,x,y)) {
-            *position = std::max(0,std::min(std::max(0,int(count) - page),*position - input.wheel_y * UI_WHEEL_LINES));
+            *position = std::max(0,std::min(std::max(0,int(count) - page),*position - input.wheel_y * PIXUI_WHEEL_SCROLL_Y * UI_WHEEL_LINES));
             return true;
         }
     }
@@ -1981,12 +2196,13 @@ PixUIDialog::PixUIDialog(PixUICanvas &context, const std::string &caption, const
     border = add<PixUIPanel>();
     body = add<PixUIPanel>();
     body->border = false;
-    body->color = COLOR_LIGHT;
+    body->color = UI_COLOR_LIGHT;
     title_label = add<PixUILabel>(caption);
+    title_label->font_role = PIXUI_FONT_HEADER;
     title_label->centered = true;
     title_label->background = true;
-    title_label->background_color = COLOR_TITLE;
-    title_label->color = COLOR_LIGHT;
+    title_label->background_color = UI_COLOR_TITLE;
+    title_label->color = pixui_theme.fonts[PIXUI_FONT_HEADER].color;
     close_button = add<PixUIButton>(UI_CONTROL_SYSTEM);
     close_button->activate = [this]() { dismiss(); };
     if (!accept.empty()) {
@@ -2002,20 +2218,19 @@ PixUIDialog::PixUIDialog(PixUICanvas &context, const std::string &caption, const
     resize_handle->visible = false;
 }
 
-void PixUIDialog::center(const PixUIRect &client)
+void PixUIDialog::center(const PixUIRect &client, const PixUIRect &area)
 {
-    available = client;
-    if (!resizable) bounds = {client.x + (client.w - dialog_width) / 2,client.y + (client.h - dialog_height) / 2,dialog_width,dialog_height};
-    else {
-        dialog_width = std::min(dialog_width,client.w);
-        dialog_height = std::min(dialog_height,client.h);
-        if (!positioned) bounds = {client.x + (client.w - dialog_width) / 2,client.y + (client.h - dialog_height) / 2,dialog_width,dialog_height};
-        bounds.w = dialog_width;
-        bounds.h = dialog_height;
-        bounds.x = std::max(client.x,std::min(bounds.x,client.x + client.w - bounds.w));
-        bounds.y = std::max(client.y,std::min(bounds.y,client.y + client.h - bounds.h));
-        positioned = true;
+    available = area.w > 0 && area.h > 0? area : client;
+    if (resizable) {
+        dialog_width = std::min(dialog_width,available.w);
+        dialog_height = std::min(dialog_height,available.h);
     }
+    if (!positioned) bounds = {client.x + (client.w - dialog_width) / 2,client.y + (client.h - dialog_height) / 2,dialog_width,dialog_height};
+    bounds.w = dialog_width;
+    bounds.h = dialog_height;
+    bounds.x = std::max(available.x,std::min(bounds.x,available.x + available.w - bounds.w));
+    bounds.y = std::max(available.y,std::min(bounds.y,available.y + available.h - bounds.h));
+    positioned = true;
     layout();
 }
 
@@ -2058,6 +2273,24 @@ bool PixUIDialog::event(const PixUIEvent &input)
         dismiss();
         return true;
     }
+    if (moving && canvas.captured == this) {
+        switch (input.type) {
+        case PIXUI_UP:
+            if (input.button == PIXUI_LEFT_BUTTON) canvas.release_capture();
+            break;
+        case PIXUI_MOTION:
+            bounds.x = std::max(available.x,std::min(available.x + available.w - bounds.w,bounds.x + input.x - move_x));
+            bounds.y = std::max(available.y,std::min(available.y + available.h - bounds.h,bounds.y + input.y - move_y));
+            move_x = input.x;
+            move_y = input.y;
+            layout();
+            repaint = true;
+            break;
+        default:
+            break;
+        }
+        return true;
+    }
     if (resizing && canvas.captured == this) {
         switch (input.type) {
         case PIXUI_UP:
@@ -2088,6 +2321,13 @@ bool PixUIDialog::event(const PixUIEvent &input)
         canvas.captured = this;
         return true;
     }
+    if (input.type == PIXUI_DOWN && input.button == PIXUI_LEFT_BUTTON && pixui_inside(title_label->bounds,input.x,input.y) && !pixui_inside(close_button->bounds,input.x,input.y)) {
+        moving = true;
+        move_x = input.x;
+        move_y = input.y;
+        canvas.captured = this;
+        return true;
+    }
     PixUIForm::event(input);
     return true;
 }
@@ -2095,6 +2335,7 @@ bool PixUIDialog::event(const PixUIEvent &input)
 void PixUIDialog::cancel_capture()
 {
     resizing = false;
+    moving = false;
     PixUIForm::cancel_capture();
 }
 
@@ -2139,7 +2380,7 @@ void PixUIMessageDialog::layout()
     int cancel_width = std::max(UI_DIALOG_BUTTON_WIDTH,cancel_columns * UI_FONT_WIDTH + UI_TEXT_PADDING * 2);
     int accept_width = std::max(UI_DIALOG_BUTTON_WIDTH,accept_columns * UI_FONT_WIDTH + UI_TEXT_PADDING * 2);
     int button_width = cancel_width + (accept_button? accept_width + UI_MARGIN : 0);
-    int title_width = title_columns * UI_FONT_WIDTH + (UI_TITLE_HEIGHT + UI_CONTENT_INSET) * 2;
+    int title_width = title_columns * pixui_theme.fonts[PIXUI_FONT_HEADER].width + (UI_TITLE_HEIGHT + UI_CONTENT_INSET) * 2;
     dialog_width = std::min(UI_DIALOG_WIDTH,std::max(std::max(longest * UI_FONT_WIDTH + UI_MARGIN * 2,title_width),button_width + UI_MARGIN * 2));
     std::vector<size_t> lines = pixui_editor_lines(message->caption,std::max(1,(dialog_width - UI_MARGIN * 2) / UI_FONT_WIDTH));
     // The editor adds a caret row after an exactly filled line; message labels need only the text rows.
@@ -2169,7 +2410,7 @@ PixUIAboutDialog::PixUIAboutDialog(PixUICanvas &context, const std::string &capt
     icon->width = width;
     icon->height = height;
     for (const auto &line : text) lines.push_back(add<PixUILabel>(line));
-    if (!lines.empty()) lines[0]->color = COLOR_TITLE;
+    if (!lines.empty()) lines[0]->color = UI_COLOR_TITLE;
 }
 
 void PixUIAboutDialog::layout()

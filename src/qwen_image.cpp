@@ -425,6 +425,8 @@ bool qwen_image_memory_plan(const PixQwenMemoryInput &input, const PixQwenMemory
     uint64_t decoder_pixels;
     if (!qwen_memory_multiply(target,QWEN_VAE_FACTOR * QWEN_VAE_FACTOR,decoder_pixels) || !qwen_memory_multiply(decoder_pixels,QWEN_VAE_DECODER_BASE * QWEN_MEMORY_DECODER_BASE_MAPS * sizeof(float),activation[QWEN_STAGE_DECODE])) return false;
     if (!qwen_memory_multiply(decoder_pixels,QWEN_VAE_DECODER_BASE * 2 * sizeof(float),largest[QWEN_STAGE_DECODE]) || !qwen_memory_multiply(target,QWEN_IMAGE_CHANNELS * sizeof(float),retained[QWEN_STAGE_DECODE])) return false;
+    // Preview decoding keeps the evolving target, references, conditioning and RoPE beside its clean latent copy.
+    if (input.preview && !qwen_memory_add(retained[QWEN_STAGE_DECODE],retained[QWEN_STAGE_DIFFUSION],retained[QWEN_STAGE_DECODE])) return false;
     uint64_t worker_scores,linear_scratch,quantized_scratch;
     if (!qwen_memory_multiply(std::max({joint,uint64_t(input.language_tokens),max_vision}),input.cpu_threads,worker_scores) || !qwen_memory_multiply(worker_scores,sizeof(float),worker_scores)) return false;
     linear_scratch = uint64_t(COMPUTE_WEIGHT_ROWS) * QWEN_IMAGE_MLP * sizeof(float);
@@ -471,19 +473,26 @@ bool qwen_image_memory_plan(const PixQwenMemoryInput &input, const PixQwenMemory
     if (input.kv_cache) {
         uint64_t cache_bytes,extra,target_rotary;
         if (!qwen_memory_multiply(joint - target,uint64_t(2) * QWEN_IMAGE_LAYERS * QWEN_IMAGE_HIDDEN * sizeof(float),cache_bytes) || !qwen_memory_multiply(target,QWEN_IMAGE_HEAD_DIM * sizeof(float),target_rotary) || !qwen_memory_add(cache_bytes,target_rotary,extra)) return false;
-        PixQwenStageMemory cached = result.stages[QWEN_STAGE_DIFFUSION];
-        // Prefill still runs the full graph while all layers' prefix storage accumulates.
-        if (!qwen_memory_add(cached.activation_bytes,extra,cached.activation_bytes) || !qwen_memory_add(cached.retained_bytes,extra,cached.retained_bytes)) return false;
-        uint64_t reduce = 0;
-        if (limits.device_bytes) {
-            if (!qwen_memory_add(cached.device_peak_bytes,extra,cached.device_peak_bytes)) return false;
-            if (cached.device_peak_bytes > limits.device_bytes) reduce = cached.device_peak_bytes - limits.device_bytes;
+        std::vector<PixQwenStageMemory> cached = result.stages;
+        bool admitted = true;
+        for (PixQwenStage index : {QWEN_STAGE_DIFFUSION,QWEN_STAGE_DECODE}) {
+            if (index == QWEN_STAGE_DECODE && !input.preview) continue;
+            PixQwenStageMemory &stage = cached[size_t(index)];
+            // Prefix K/V and its target rotary factors also survive each preview decode.
+            if (!qwen_memory_add(stage.activation_bytes,extra,stage.activation_bytes) || !qwen_memory_add(stage.retained_bytes,extra,stage.retained_bytes)) return false;
+            uint64_t reduce = 0;
+            if (limits.device_bytes) {
+                if (!qwen_memory_add(stage.device_peak_bytes,extra,stage.device_peak_bytes)) return false;
+                if (stage.device_peak_bytes > limits.device_bytes) reduce = stage.device_peak_bytes - limits.device_bytes;
+                if (reduce > stage.packed_cache_bytes || input.largest_weight[size_t(index)] > stage.packed_cache_bytes - reduce) admitted = false;
+            }
+            if (reduce <= stage.packed_cache_bytes) {
+                stage.packed_cache_bytes -= reduce;
+                stage.device_peak_bytes -= reduce;
+            }
         }
-        bool admitted = !limits.device_bytes || (reduce <= cached.packed_cache_bytes && input.largest_weight[QWEN_STAGE_DIFFUSION] <= cached.packed_cache_bytes - reduce);
         if (admitted) {
-            cached.packed_cache_bytes -= reduce;
-            cached.device_peak_bytes -= reduce;
-            result.stages[QWEN_STAGE_DIFFUSION] = cached;
+            result.stages = std::move(cached);
             result.kv_cache_bytes = cache_bytes;
         }
     }
@@ -505,7 +514,7 @@ static uint64_t qwen_image_largest_weight(const PixModelFile &model, PixQwenStag
     return largest;
 }
 
-PixImage qwen_image_edit(const PixEditSettings &settings, const std::vector<PixImage> &references, const std::string &prompt, const InferenceProgress &progress, int &error)
+PixImage qwen_image_edit(const PixEditSettings &settings, const std::vector<PixImage> &references, const std::string &prompt, const InferenceProgress &progress, int &error, const std::function<bool()> &decode_enabled, const InferencePreview &preview)
 {
     error = INFERENCE_ERROR_SETTINGS;
     std::string detail;
@@ -525,6 +534,7 @@ PixImage qwen_image_edit(const PixEditSettings &settings, const std::vector<PixI
     }
     PixQwenMemoryInput memory;
     memory.kv_cache = true;
+    memory.preview = preview && decode_enabled;
     memory.target = {size_t(settings.width / QWEN_VAE_FACTOR),size_t(settings.height / QWEN_VAE_FACTOR)};
     memory.cpu_threads = cpu_thread_count();
     for (const PixImage &reference : references) if (!image_valid(reference)) return {};
@@ -685,6 +695,12 @@ PixImage qwen_image_edit(const PixEditSettings &settings, const std::vector<PixI
         };
         float model_time = (sigmas[size_t(step)] * QWEN_IMAGE_TIME_SCALE) / QWEN_IMAGE_TIME_SCALE;
         PixTensor flow = qwen_image_diffuse(diffuser,target,fixed,condition,layout,model_time,block_progress,plan.kv_cache_bytes? &cache : nullptr);
+        PixTensor clean;
+        // Predict the zero-noise image from this step's positive flow; the final step is decoded below.
+        if (step + 1 < settings.steps && preview && decode_enabled && decode_enabled()) {
+            clean = target;
+            qwen_image_euler(clean,flow,sigmas[size_t(step)],0);
+        }
         qwen_image_euler(target,flow,sigmas[size_t(step)],sigmas[size_t(step + 1)]);
 #ifdef PIXELINA_WITH_VULKAN
         if (!vulkan_synchronize()) return {};
@@ -698,6 +714,30 @@ PixImage qwen_image_edit(const PixEditSettings &settings, const std::vector<PixI
                 error = INFERENCE_ERROR_NUMERICAL;
                 return {};
             }
+        }
+        flow = PixTensor();
+        if (!clean.values.empty()) {
+            auto preview_progress = [&](float, const std::string &name) {
+                return block_progress(1,"Preview: " + name);
+            };
+            if (!preview_progress(0,"Loading preview VAE")) {
+                error = INFERENCE_ERROR_STOPPED;
+                return {};
+            }
+            if (!stage(QWEN_STAGE_DECODE)) return {};
+            error = INFERENCE_ERROR_MODEL;
+            if (vae.open(settings.vae,true)) return {};
+            PixImage decoded = qwen_vae_decode(vae,std::move(clean),memory.target.width,memory.target.height,preview_progress);
+            if (!image_valid(decoded) || decoded.width != settings.width || decoded.height != settings.height || decoded.alpha.empty()) {
+                error = cancelled? INFERENCE_ERROR_STOPPED : INFERENCE_ERROR_NUMERICAL;
+                return {};
+            }
+#ifdef PIXELINA_WITH_VULKAN
+            if (!vulkan_synchronize()) return {};
+#endif
+            vae.close();
+            preview(std::move(decoded));
+            if (!stage(QWEN_STAGE_DIFFUSION)) return {};
         }
     }
     cache = PixQwenKVCache();

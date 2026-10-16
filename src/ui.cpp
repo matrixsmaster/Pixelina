@@ -18,12 +18,13 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include "ui.h"
+#include "ui_about.h"
 #include "ui_refdlg.h"
 #include "ui_chatdlg.h"
+#include "dlg_bookimg.h"
 #include "inference.h"
 #include "qwen_image.h"
 #include "backend_vulkan.h"
-#include "../assets/pixelina_icon.h"
 
 static const char* field_labels[UI_SETTINGS_COUNT] = {"Seed","Width","Height","Steps","Scheduler shift","Diffuser GGUF","Text encoder GGUF","VAE safetensors"};
 static const char* edit_field_labels[UI_EDIT_SETTINGS_COUNT] = {"Seed","Width","Height","Steps","Reference resolution","Diffuser GGUF","Language encoder GGUF","Vision projector GGUF","VAE safetensors"};
@@ -67,6 +68,7 @@ void Pixelina::save_configuration()
     PixUIRect normal = canvas.restored_window;
     if (!(SDL_GetWindowFlags(window) & (SDL_WINDOW_MAXIMIZED | SDL_WINDOW_MINIMIZED))) normal = canvas.window_rect();
     std::map<std::string,std::string> values = {
+        {UI_CONFIG_THEME,theme_path},
         {UI_CONFIG_BACKEND,settings.backend},
         {UI_CONFIG_FORMAT,settings.format},
         {UI_CONFIG_AUTO_SEED,std::to_string(auto_seed)},
@@ -131,6 +133,11 @@ bool Pixelina::initialize(const std::string &directory, bool png, std::string &e
     }
     std::map<std::string,std::string> configuration;
     if (!config_load(user_directory,configuration,error)) return false;
+    if (!bookmarks_load(user_directory,bookmarks,error)) return false;
+    auto theme = configuration.find(UI_CONFIG_THEME);
+    if (theme != configuration.end()) theme_path = theme->second;
+    if (!pixui_load_theme(theme_path.empty()? std::string{} : path_join(user_directory,theme_path),error)) return false;
+    main_form.create_controls();
     restore_configuration(configuration);
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER)) {
         error = SDL_GetError();
@@ -156,19 +163,14 @@ bool Pixelina::initialize(const std::string &directory, bool png, std::string &e
         return false;
     }
     PixImage icon;
-    if (!image_decode(pixelina_icon,sizeof(pixelina_icon) - 1,icon,error)) return false;
+    if (!PixelinaAbout::first_frame(icon,error)) return false;
     SDL_Surface* surface = SDL_CreateRGBSurfaceFrom(icon.rgb.data(),icon.width,icon.height,24,icon.width * 3,SDL_BYTEORDER == SDL_LIL_ENDIAN? 0x0000ff : 0xff0000,0x00ff00,SDL_BYTEORDER == SDL_LIL_ENDIAN? 0xff0000 : 0x0000ff,0);
     if (!surface) {
         error = SDL_GetError();
         return false;
     }
     SDL_SetWindowIcon(window,surface);
-    app_icon = SDL_CreateTextureFromSurface(renderer,surface);
     SDL_FreeSurface(surface);
-    if (!app_icon) {
-        error = SDL_GetError();
-        return false;
-    }
     canvas.renderer = renderer;
     if (png) settings.format = PIXELINA_PNG;
     build_gui();
@@ -210,8 +212,8 @@ Pixelina::~Pixelina()
     if (initialized) save_configuration();
     canvas.release_capture();
     main_form.clear();
+    canvas.set_main_image(nullptr,nullptr);
     if (current) SDL_DestroyTexture(current);
-    if (app_icon) SDL_DestroyTexture(app_icon);
     if (mutex) SDL_DestroyMutex(mutex);
     if (renderer) SDL_DestroyRenderer(renderer);
     if (window) SDL_DestroyWindow(window);
@@ -272,11 +274,13 @@ void Pixelina::layout()
     }
     main_form.tabs->selection_enabled = !busy;
     for (PixUIButton* button : main_form.random_seed) button->enabled = !busy;
+    for (PixUIButton* button : main_form.dimension_buttons) button->enabled = !busy;
     main_form.generate->caption = busy? (stop_requested? UI_STOPPING_TEXT : "Stop [F5]") : "Generate [F5]";
     main_form.preferences->caption = settings.backend + " / " + settings.format;
     main_form.carousel->enabled = !busy;
+    main_form.bookmarks->enabled = !busy;
     main_form.image->set_image(current,image.width,image.height);
-    static_cast<PixUIGroupBox*>(main_form.image->parent)->caption = image.width > 0 && image.height > 0? UI_IMAGE_TITLE " (" + std::to_string(image.width) + "x" + std::to_string(image.height) + ")" : UI_IMAGE_TITLE;
+    main_form.groups[UI_IMAGE_GROUP]->caption = image.width > 0 && image.height > 0? UI_IMAGE_TITLE " (" + std::to_string(image.width) + "x" + std::to_string(image.height) + ")" : UI_IMAGE_TITLE;
     char timing[UI_STATUS_BUFFER];
     if (busy && generation_progress > 0 && generation_progress < 1) {
         double elapsed = double(canvas.ticks() - generation_started) / 1000;
@@ -396,7 +400,7 @@ bool Pixelina::capture_job()
         candidate.parameters.edit_settings = edit_settings;
         candidate.edit_settings = edit_settings;
         if (reference_paths.empty()) {
-            if (image_valid(image)) {
+            if (image_valid(image) && (!image_has_record || image_record.model != PIX_MODEL_QWEN_IMAGE)) {
                 candidate.references.push_back(image);
                 if (!image_source_path.empty()) candidate.parameters.references.push_back(image_source_path);
             }
@@ -468,11 +472,14 @@ bool Pixelina::open_image(const std::string &path)
     if (current) SDL_DestroyTexture(current);
     current = texture;
     image = std::move(loaded);
+    canvas.set_main_image(&image,current);
     image_record = PixRecord();
     image_has_record = false;
     image_source_path = actual;
     unsaved = false;
     main_form.carousel->select(-1);
+    main_form.bookmarks->select(-1);
+    bookmark_selection = -1;
     edit_settings.width = (image.width + QWEN_IMAGE_MULTIPLE - 1) / QWEN_IMAGE_MULTIPLE * QWEN_IMAGE_MULTIPLE;
     edit_settings.height = (image.height + QWEN_IMAGE_MULTIPLE - 1) / QWEN_IMAGE_MULTIPLE * QWEN_IMAGE_MULTIPLE;
     main_form.edit_fields[UI_EDIT_WIDTH]->set_text(std::to_string(edit_settings.width));
@@ -480,9 +487,8 @@ bool Pixelina::open_image(const std::string &path)
     reference_resolution();
     status = actual;
     auto selected = std::find_if(images.begin(),images.end(),[&](const std::string &filename) { return path_normalize(path_join(workdir,filename)) == actual; });
-    if (selected == images.end()) return true;
-    main_form.carousel->select(int(selected - images.begin()));
-    auto record = std::find_if(records.begin(),records.end(),[&](const PixRecord &value) { return path_join(workdir,value.filename) == actual; });
+    if (selected != images.end()) main_form.carousel->select(int(selected - images.begin()));
+    auto record = std::find_if(records.begin(),records.end(),[&](const PixRecord &value) { return path_normalize(path_join(workdir,value.filename)) == actual; });
     if (record == records.end()) return true;
     image_record = *record;
     image_has_record = true;
@@ -492,12 +498,13 @@ bool Pixelina::open_image(const std::string &path)
         write_settings();
     } else {
         edit_settings = image_record.edit_settings;
+        reference_paths = image_record.references;
         settings.backend = edit_settings.backend;
         settings.format = edit_settings.format;
         write_edit_settings();
     }
     main_form.prompt->set_text(image_record.prompt);
-    status = *selected;
+    status = selected == images.end()? actual : *selected;
     return true;
 }
 
@@ -511,6 +518,36 @@ bool Pixelina::select_image(size_t index)
 {
     if (index >= images.size() || busy) return false;
     return open_image(path_join(workdir,images[index]));
+}
+
+void Pixelina::bookmark_image(bool remove)
+{
+    std::vector<std::string> changed = bookmarks;
+    if (remove) {
+        if (bookmark_selection < 0 || size_t(bookmark_selection) >= bookmarks.size()) {
+            message("Select an image in the Bookmarks carousel first.");
+            return;
+        }
+        changed.erase(changed.begin() + bookmark_selection);
+    } else {
+        if (image_source_path.empty()) {
+            message("Save the image before bookmarking it.");
+            return;
+        }
+        if (std::find(bookmarks.begin(),bookmarks.end(),image_source_path) != bookmarks.end()) return;
+        changed.push_back(image_source_path);
+    }
+    std::string error;
+    if (!bookmarks_save(user_directory,changed,error)) {
+        message(error);
+        return;
+    }
+    bookmarks.swap(changed);
+    main_form.bookmarks->items_changed(bookmarks.size());
+    if (remove) {
+        bookmark_selection = -1;
+        main_form.bookmarks->select(-1);
+    }
 }
 
 void Pixelina::save_image()
@@ -583,7 +620,7 @@ void Pixelina::generation_job(const PixJobInference &inference)
         SDL_UnlockMutex(mutex);
     };
     if (inference) result = inference(job,progress,code);
-    else if (job.parameters.model == PIX_MODEL_QWEN_IMAGE) result = qwen_image_edit(job.edit_settings,job.references,job.parameters.prompt,progress,code);
+    else if (job.parameters.model == PIX_MODEL_QWEN_IMAGE) result = qwen_image_edit(job.edit_settings,job.references,job.parameters.prompt,progress,code,decode_enabled,preview);
     else result = inference_generate(job.generate_settings,job.parameters.prompt,progress,code,decode_enabled,preview);
     if (!code && !image_valid(result)) code = INFERENCE_ERROR_NUMERICAL;
     if (stop_requested) error = UI_STOPPED_TEXT;
@@ -632,10 +669,19 @@ void Pixelina::action(int command)
         return;
     }
     if (command == CMD_ABOUT) {
-        int width,height;
-        SDL_QueryTexture(app_icon,nullptr,nullptr,&width,&height);
         std::vector<std::string> lines = PIXELINA_ABOUT;
-        main_form.present(std::make_unique<PixUIAboutDialog>(canvas,UI_ABOUT_PREFIX PIXELINA_NAME,app_icon,width,height,lines));
+        auto about = std::make_unique<PixelinaAbout>(canvas,PIXELINA_ABOUT_PREFIX PIXELINA_NAME,PIXELINA_ABOUT_FPS,lines);
+        std::string error;
+        if (!about->prepare_about_animation(renderer,error)) {
+            message(error);
+            return;
+        }
+        main_form.present(std::move(about));
+        return;
+    }
+    if (command == CMD_FULLSCREEN) {
+        main_form.fullscreen = !main_form.fullscreen;
+        if (main_form.fullscreen) main_form.focus_object(main_form.image_tabs->selected() == UI_BOOKMARKS_PAGE? *main_form.bookmarks : *main_form.carousel);
         return;
     }
     if (busy && command == CMD_GENERATE) {
@@ -657,6 +703,12 @@ void Pixelina::action(int command)
     }
     if (busy) return;
     switch (command) {
+    case CMD_BOOKMARK:
+        bookmark_image(false);
+        break;
+    case CMD_UNBOOKMARK:
+        bookmark_image(true);
+        break;
     case CMD_CHAT: {
         if (!image_valid(image)) {
             message("Open or generate an image before starting a chat.");
@@ -683,6 +735,7 @@ void Pixelina::action(int command)
         break;
     }
     case CMD_CLEAR:
+        canvas.set_main_image(nullptr,nullptr);
         if (current) SDL_DestroyTexture(current);
         current = nullptr;
         image = PixImage();
@@ -698,12 +751,14 @@ void Pixelina::action(int command)
         generation_seconds = 0;
         main_form.image->set_image(nullptr,0,0);
         main_form.carousel->select(-1);
+        main_form.bookmarks->select(-1);
+        bookmark_selection = -1;
         status = UI_READY_TEXT;
         break;
     case CMD_MULTI_REFERENCE: {
         std::vector<std::string> paths = reference_paths;
-        if (paths.empty() && image_valid(image) && !image_source_path.empty()) paths.push_back(image_source_path);
-        auto dialog = std::make_unique<PixelinaReferenceDialog>(canvas,paths,main_form.prompt->model.text);
+        if (paths.empty() && image_valid(image) && !image_source_path.empty() && (!image_has_record || image_record.model != PIX_MODEL_QWEN_IMAGE)) paths.push_back(image_source_path);
+        auto dialog = std::make_unique<PixelinaReferenceDialog>(canvas,paths,main_form.prompt->model.text,bookmarks);
         dialog->load = [this](const std::string &path) {
             return load_thumbnail(path);
         };
@@ -833,7 +888,7 @@ void Pixelina::build_menus()
     file->add("Quit",[this]() { action(CMD_QUIT); })->bind_shortcut('q',PIXUI_CTRL,"Ctrl+Q");
     PixUIMenu* edit = popups[1];
     edit->add("Clear",[this]() { action(CMD_CLEAR); });
-    edit->add("Multi-Reference...")->activate = [this]() {
+    edit->add("Multi-Reference")->activate = [this]() {
         action(CMD_MULTI_REFERENCE);
     };
     PixUIMenuItem* generate = edit->add(UI_GENERATE_TEXT,[this]() { action(CMD_GENERATE); });
@@ -863,6 +918,12 @@ void Pixelina::build_menus()
     vulkan->checkable = true;
     vulkan->checked_state = [this]() { return settings.backend == PIXELINA_VULKAN; };
     PixUIMenuItem* scaled = popups[2]->add("Scaled view",[this]() { action(CMD_SCALED); });
+    PixUIMenuItem* fullscreen = popups[2]->add("FullScreen",[this]() { action(CMD_FULLSCREEN); });
+    fullscreen->bind_shortcut(PIXUI_F11,0,"F11");
+    fullscreen->checkable = true;
+    fullscreen->checked_state = [this]() { return main_form.fullscreen; };
+    popups[2]->add("Bookmark",[this]() { action(CMD_BOOKMARK); })->bind_shortcut(PIXUI_F2,0,"F2");
+    popups[2]->add("Unbookmark",[this]() { action(CMD_UNBOOKMARK); })->bind_shortcut(PIXUI_F2,PIXUI_SHIFT,"Shift+F2");
     scaled->bind_shortcut(PIXUI_F3,0,"F3");
     scaled->checkable = true;
     scaled->checked_state = [this]() { return main_form.image->scaled; };
@@ -871,7 +932,7 @@ void Pixelina::build_menus()
     decode->checked_state = [this]() { return decode_on_the_go.load(); };
     PixUIMenuItem* chat = popups[2]->add("Chat",[this]() { action(CMD_CHAT); });
     chat->enabled_state = [this]() { return !busy && image_valid(image); };
-    popups[3]->add(UI_ABOUT_PREFIX PIXELINA_NAME,[this]() { action(CMD_ABOUT); });
+    popups[3]->add(PIXELINA_ABOUT_PREFIX PIXELINA_NAME,[this]() { action(CMD_ABOUT); });
     main_form.add_system_menu();
 }
 
@@ -887,6 +948,14 @@ void Pixelina::build_gui()
     main_form.carousel->release = [](void* texture) { SDL_DestroyTexture(static_cast<SDL_Texture*>(texture)); };
     main_form.carousel->cache_limit = PIXELINA_THUMB_CACHE;
     main_form.carousel->selected = [this](size_t index) { return select_image(index); };
+    bookmark_carousel_setup(*main_form.bookmarks,bookmarks,[this](const std::string &path) { return load_thumbnail(path); });
+    main_form.bookmarks->selected = [this](size_t index) {
+        if (busy || index >= bookmarks.size()) return false;
+        open_image(bookmarks[index]);
+        // Missing files remain selectable so their stale bookmarks can be removed.
+        bookmark_selection = int(index);
+        return true;
+    };
     for (size_t page = 0; page < UI_SETTINGS_PAGES; page++) {
         main_form.random_seed[page]->activate = [this,page]() {
             if (!busy) randomize_seed(page);
@@ -990,8 +1059,11 @@ void Pixelina::generation_image(PixImage completed)
     image_source_path.clear();
     unsaved = true;
     main_form.carousel->select(-1);
+    main_form.bookmarks->select(-1);
+    bookmark_selection = -1;
     if (current) SDL_DestroyTexture(current);
     current = uploaded? texture : nullptr;
+    canvas.set_main_image(&image,current);
     if (!uploaded) {
         if (texture) SDL_DestroyTexture(texture);
         message("Image generated and available to Save; display upload failed: " + std::string(SDL_GetError()));
@@ -1047,15 +1119,22 @@ int Pixelina::run()
 
 PixelinaForm::PixelinaForm(PixUICanvas &context) : PixUIForm(context)
 {
+}
+
+void PixelinaForm::create_controls()
+{
     decorate(caption);
     menu_background = add<PixUIPanel>();
-    menu_background->color = COLOR_LIGHT;
+    menu_background->color = UI_COLOR_LIGHT;
     menu_background->border = false;
-    const char* headings[] = {"Prompt","Settings","Saved images",UI_IMAGE_TITLE};
+    const char* headings[] = {"Prompt","Settings","",UI_IMAGE_TITLE};
     for (int i = 0; i < UI_GROUP_COUNT; i++) {
         if (i == UI_SETTINGS_GROUP) {
             tabs = add<PixTab>();
             groups[i] = tabs;
+        } else if (i == UI_CAROUSEL_GROUP) {
+            image_tabs = add<PixTab>();
+            groups[i] = image_tabs;
         } else groups[i] = add<PixUIGroupBox>(headings[i]);
     }
     PixUIGroupBox* prompt_group = groups[UI_PROMPT_GROUP];
@@ -1077,9 +1156,36 @@ PixelinaForm::PixelinaForm(PixUICanvas &context) : PixUIForm(context)
             if (page == UI_GENERATE_PAGE) fields[i] = field;
             else edit_fields[i] = field;
             register_focus(*field);
-            int button_width = i == UI_SEED_FIELD || i >= UI_MODEL_FIRST? UI_BROWSE_BUTTON_WIDTH : 0;
+            bool dimension = i == UI_WIDTH_FIELD || i == UI_HEIGHT_FIELD || (page == UI_EDIT_PAGE && i == UI_EDIT_RESOLUTION);
+            int button_width = dimension? UI_SPIN_BUTTON_WIDTH : (i == UI_SEED_FIELD || i >= UI_MODEL_FIRST? UI_BROWSE_BUTTON_WIDTH : 0);
             settings->place(*field,{UI_MARGIN - UI_BORDER_WIDTH,int(i) * UI_SETTINGS_ROW + UI_FIELD_INPUT_Y,-(UI_MARGIN - UI_BORDER_WIDTH) * 2 - button_width,UI_FIELD_HEIGHT},PIXUI_STRETCH_X | PIXUI_FULLY_VISIBLE);
             if (!button_width) continue;
+            if (dimension) {
+                for (int direction : {1,-1}) {
+                    PixUIButton* button = settings->add<PixUIButton>(direction > 0? UI_CONTROL_UP : UI_CONTROL_DOWN);
+                    dimension_buttons.push_back(button);
+                    int step = page == UI_GENERATE_PAGE? PIXELINA_IMAGE_MULTIPLE : QWEN_IMAGE_MULTIPLE;
+                    button->activate = [this,field,direction,step]() {
+                        if (!field->enabled) return;
+                        uint64_t value;
+                        if (!parse_unsigned(field->model.text,value) || value > INT32_MAX) return;
+                        if (direction > 0) {
+                            if (value > uint64_t(INT32_MAX - step)) return;
+                            value += step;
+                        } else {
+                            if (value < uint64_t(step * 2)) return;
+                            value -= step;
+                        }
+                        field->set_text(std::to_string(value));
+                        focus_control(*field);
+                    };
+                    if (direction > 0) field->increment = button->activate;
+                    else field->decrement = button->activate;
+                    int y = int(i) * UI_SETTINGS_ROW + UI_FIELD_INPUT_Y + (direction > 0? 0 : UI_FIELD_HEIGHT / 2);
+                    settings->place(*button,{-(UI_MARGIN - UI_BORDER_WIDTH) - button_width,y,button_width,UI_FIELD_HEIGHT / 2},PIXUI_ALIGN_RIGHT | PIXUI_FULLY_VISIBLE);
+                }
+                continue;
+            }
             PixUIButton* button = settings->add<PixUIButton>(i == UI_SEED_FIELD? "R" : "...");
             if (i == UI_SEED_FIELD) random_seed[page] = button;
             else if (page == UI_GENERATE_PAGE) browse[i] = button;
@@ -1105,11 +1211,12 @@ PixelinaForm::PixelinaForm(PixUICanvas &context) : PixUIForm(context)
         }
         if (hidden_focus) focus_control(page == UI_GENERATE_PAGE? *fields[0] : *edit_fields[0]);
     };
-    carousel = groups[UI_CAROUSEL_GROUP]->add<PixUICarousel>();
-    groups[UI_CAROUSEL_GROUP]->place(*carousel,{0,0,0,0},PIXUI_STRETCH_X | PIXUI_STRETCH_Y);
-    image = groups[UI_IMAGE_GROUP]->add<PixUIImageView>();
-    groups[UI_IMAGE_GROUP]->place(*image,{0,0,0,0},PIXUI_STRETCH_X | PIXUI_STRETCH_Y);
-    image->placeholder = "Generate or select an image";
+    PixTabGroup* images_page = image_tabs->add_group("Images");
+    carousel = images_page->add<PixUICarousel>();
+    images_page->place(*carousel,{0,0,0,0},PIXUI_STRETCH_X | PIXUI_STRETCH_Y);
+    PixTabGroup* bookmarks_page = image_tabs->add_group(UI_BOOKMARKS_TITLE);
+    bookmarks = bookmarks_page->add<PixUICarousel>();
+    bookmarks_page->place(*bookmarks,{0,0,0,0},PIXUI_STRETCH_X | PIXUI_STRETCH_Y);
     status = add<PixUIStatusBar>();
     status->progress_width = UI_STATUS_PROGRESS_WIDTH;
     status->progress_offset = UI_STATUS_PROGRESS_OFFSET;
@@ -1132,6 +1239,8 @@ PixelinaForm::PixelinaForm(PixUICanvas &context) : PixUIForm(context)
             layout();
         };
     }
+    image = add<PixUIImageView>();
+    image->placeholder = "Generate or select an image";
 }
 
 void PixelinaForm::layout()
@@ -1150,5 +1259,15 @@ void PixelinaForm::layout()
     splitters[UI_SPLIT_LEFT]->bounds = {groups[UI_PROMPT_GROUP]->bounds.x + groups[UI_PROMPT_GROUP]->bounds.w,UI_WORK_TOP,UI_SPLITTER_WIDTH,bounds.h - UI_WORK_TOP - UI_STATUS_HEIGHT - UI_FRAME};
     splitters[UI_SPLIT_PROMPT]->bounds = {groups[UI_PROMPT_GROUP]->bounds.x,groups[UI_PROMPT_GROUP]->bounds.y + groups[UI_PROMPT_GROUP]->bounds.h,groups[UI_PROMPT_GROUP]->bounds.w,UI_SPLITTER_WIDTH};
     splitters[UI_SPLIT_CAROUSEL]->bounds = {groups[UI_CAROUSEL_GROUP]->bounds.x,groups[UI_CAROUSEL_GROUP]->bounds.y + groups[UI_CAROUSEL_GROUP]->bounds.h,groups[UI_CAROUSEL_GROUP]->bounds.w,UI_SPLITTER_WIDTH};
+    PixUIGroupBox* group = groups[UI_IMAGE_GROUP];
+    image->bounds = fullscreen? bounds : PixUIRect{group->bounds.x + group->inset_x,group->bounds.y + group->inset_top,std::max(0,group->bounds.w - group->inset_x * 2),std::max(0,group->bounds.h - group->inset_top - group->inset_bottom)};
     PixUIForm::layout();
+}
+
+void PixelinaForm::draw()
+{
+    if (!visible) return;
+    PixUIForm::draw();
+    // Menus paint above ordinary children; cover them with the expanded image.
+    if (fullscreen && !modal()) image->draw();
 }

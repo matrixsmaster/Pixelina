@@ -58,10 +58,12 @@ void block_a_to_shmem(uint buffer_index, uint row, uint feature, uint lane)
         uint offset = row * p[5];
         uint base = offset + (feature / MODEL_QUANT_BLOCK) * (TYPE == MODEL_Q5_K? MODEL_Q5_BYTES : MODEL_Q6_BYTES);
         uint group = (feature % MODEL_QUANT_BLOCK) / BK;
-        if (TYPE == MODEL_Q8_0) {
+        switch (TYPE) {
+        case MODEL_Q8_0:
             base = offset + (feature / BK) * MODEL_Q8_BYTES;
             dm.x = weight_half(base);
-        } else if (TYPE == MODEL_Q5_K) {
+            break;
+        case MODEL_Q5_K: {
             uint scale,minimum;
             if (group < 4) {
                 scale = weight_byte(base + 4 + group) & VK_Q5_SCALE_MASK;
@@ -71,25 +73,36 @@ void block_a_to_shmem(uint buffer_index, uint row, uint feature, uint lane)
                 minimum = (weight_byte(base + 8 + group) >> 4) | ((weight_byte(base + 4 + group) >> 6) << 4);
             }
             dm = vec2(weight_half(base) * scale,weight_half(base + 2) * minimum);
-        } else {
+            break;
+        }
+        default: {
             uint scale = base + VK_Q6_SCALE_OFFSET + group * 2;
             dm = weight_half(base + VK_Q6_DELTA_OFFSET) * vec2(signed_byte(weight_byte(scale)),signed_byte(weight_byte(scale + 1)));
+            break;
+        }
         }
         for (uint j = 0; j < 4; j++) {
             uint index = lane * 4 + j;
             int value;
-            if (TYPE == MODEL_Q8_0) value = signed_byte(weight_byte(base + 2 + index));
-            else if (TYPE == MODEL_Q5_K) {
+            switch (TYPE) {
+            case MODEL_Q8_0:
+                value = signed_byte(weight_byte(base + 2 + index));
+                break;
+            case MODEL_Q5_K: {
                 uint low = weight_byte(base + VK_Q5_LOW_OFFSET + (group / 2) * BK + index);
                 uint quant = group % 2 == 0? low & 15 : low >> 4;
                 quant |= ((weight_byte(base + VK_Q5_HIGH_OFFSET + index) >> group) & 1) << 4;
                 value = int(quant);
-            } else {
+                break;
+            }
+            default: {
                 uint portion = group / 4,part = group % 4;
                 uint low = weight_byte(base + portion * BK * 2 + index + (part % 2) * BK);
                 uint quant = part < 2? low & 15 : low >> 4;
                 quant |= ((weight_byte(base + VK_Q6_HIGH_OFFSET + portion * BK + index) >> (part * 2)) & 3) << 4;
                 value = int(quant) - BK;
+                break;
+            }
             }
             packed |= (uint(value) & 255) << (j * 8);
         }

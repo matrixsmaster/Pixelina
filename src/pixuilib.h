@@ -8,6 +8,7 @@
 #define PIXELINA_PIXUILIB_H
 
 #include "os.h"
+#include <algorithm>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -18,20 +19,27 @@
 
 #define UI_UTF8_MASK 0xc0
 #define UI_UTF8_CONTINUATION 0x80
-#define UI_FONT_WIDTH 8
-#define UI_FONT_HEIGHT 8
-#define UI_LINE_HEIGHT 16
-#define UI_MENU_ROW 18
+#define UI_DEFAULT_FONT_WIDTH 8
+#define UI_DEFAULT_FONT_HEIGHT 8
+#define UI_FONT_LINE_GAP 8
+#define UI_FIELD_PADDING 16
+#define UI_TITLE_PADDING 16
+#define UI_FONT_WIDTH (pixui_theme.fonts[PIXUI_FONT_LABEL].width)
+#define UI_FONT_HEIGHT (pixui_theme.fonts[PIXUI_FONT_LABEL].height)
+#define UI_LINE_HEIGHT (UI_FONT_HEIGHT + UI_FONT_LINE_GAP)
+#define UI_TEXT_WIDTH (pixui_theme.fonts[PIXUI_FONT_TEXT].width)
+#define UI_TEXT_LINE_HEIGHT (pixui_theme.fonts[PIXUI_FONT_TEXT].height + UI_FONT_LINE_GAP)
+#define UI_MENU_ROW (UI_LINE_HEIGHT + UI_MENU_BORDER)
 #define UI_MENU_BORDER 2
 #define UI_SCROLLBAR 16
-#define COLOR_FACE 0xc0c0c0
-#define COLOR_LIGHT 0xffffff
-#define COLOR_SHADOW 0x808080
-#define COLOR_DARK 0x000000
-#define COLOR_TITLE 0x0000c0
-#define COLOR_DESKTOP 0xffffff
-#define COLOR_SELECTED 0x000080
-#define COLOR_DISABLED 0x606060
+#define UI_COLOR_FACE (pixui_theme.colors[PIXUI_COLOR_FACE])
+#define UI_COLOR_LIGHT (pixui_theme.colors[PIXUI_COLOR_LIGHT])
+#define UI_COLOR_SHADOW (pixui_theme.colors[PIXUI_COLOR_SHADOW])
+#define UI_COLOR_DARK (pixui_theme.colors[PIXUI_COLOR_DARK])
+#define UI_COLOR_TITLE (pixui_theme.colors[PIXUI_COLOR_TITLE])
+#define UI_COLOR_DESKTOP (pixui_theme.colors[PIXUI_COLOR_DESKTOP])
+#define UI_COLOR_SELECTED (pixui_theme.colors[PIXUI_COLOR_SELECTED])
+#define UI_COLOR_DISABLED (pixui_theme.colors[PIXUI_COLOR_DISABLED])
 #define UI_CONTENT_INSET 3
 #define UI_TEXT_PADDING 4
 #define UI_FONT_GLYPHS 128
@@ -47,8 +55,10 @@
 #define UI_LABEL_PADDING 8
 #define UI_WHEEL_LINES 3
 #define UI_MENU_PADDING 6
-#define UI_MENU_CHECK_WIDTH 24
+#define UI_MENU_CHECK_COLUMNS 3
+#define UI_MENU_CHECK_WIDTH (UI_FONT_WIDTH * UI_MENU_CHECK_COLUMNS)
 #define UI_CHECK_MARK "[x]"
+#define UI_UNCHECK_MARK "[ ]"
 #define UI_CLOSE_TEXT "Close"
 #define UI_CANCEL_TEXT "Cancel"
 #define UI_OK_TEXT "OK"
@@ -58,29 +68,34 @@
 #define UI_IMAGE_WHEEL_STEP 48
 #define UI_PERCENT_SCALE 100
 #define UI_MENU_GAP 8
+#define UI_MENU_SHORTCUT_GAP (UI_FONT_WIDTH * 3)
 #define UI_DOUBLE_CLICK_MS 500
-#define UI_FIELD_HEIGHT 24
-#define UI_TITLE_HEIGHT 24
+#define UI_FIELD_HEIGHT (std::max(UI_FONT_HEIGHT,pixui_theme.fonts[PIXUI_FONT_TEXT].height) + UI_FIELD_PADDING)
+#define UI_TITLE_HEIGHT (pixui_theme.fonts[PIXUI_FONT_HEADER].height + UI_TITLE_PADDING)
 #define UI_TAB_HEIGHT UI_FIELD_HEIGHT
 #define UI_TAB_PADDING UI_MARGIN
 #define UI_TAB_SLOPE 4
 #define UI_TAB_RAISE 2
 #define UI_MARGIN 8
-#define UI_MENU_HEIGHT 20
-#define UI_WINDOW_TITLE_HEIGHT 24
+#define UI_MENU_HEIGHT (UI_FONT_HEIGHT + UI_MENU_PADDING * 2)
+#define UI_WINDOW_TITLE_HEIGHT UI_TITLE_HEIGHT
 #define UI_FRAME 4
 #define UI_DIRECTORY_ROWS 12
-#define UI_DIALOG_BROWSE_WIDTH 96
-#define UI_DIALOG_BUTTON_WIDTH 80
-#define UI_DIALOG_HEIGHT 400
+#define UI_DIALOG_BROWSE_COLUMNS 12
+#define UI_DIALOG_BUTTON_COLUMNS 10
+#define UI_DIALOG_BROWSE_WIDTH (UI_FONT_WIDTH * UI_DIALOG_BROWSE_COLUMNS)
+#define UI_DIALOG_BUTTON_WIDTH (UI_FONT_WIDTH * UI_DIALOG_BUTTON_COLUMNS)
+#define UI_DIALOG_MARGIN_COUNT 10
+#define UI_DIALOG_HEIGHT (UI_TITLE_HEIGHT + (UI_DIRECTORY_ROWS + 2) * UI_LINE_HEIGHT + UI_FIELD_HEIGHT * 3 + UI_MARGIN * UI_DIALOG_MARGIN_COUNT)
 #define UI_DIALOG_WIDTH 580
 #define UI_DIALOG_RESIZE_TEXT "\\"
-#define UI_ABOUT_SPACING 16
+#define UI_ABOUT_SPACING UI_LINE_HEIGHT
 #define UI_ABOUT_LINE_COUNT 4
 #define UI_ABOUT_ICON_SIZE 64
-#define UI_ABOUT_HEIGHT 148
+#define UI_ABOUT_HEIGHT (UI_TITLE_HEIGHT + UI_ABOUT_SPACING * 2 + UI_ABOUT_LINE_COUNT * UI_LINE_HEIGHT + UI_TEXT_PADDING + UI_FIELD_HEIGHT)
 #define UI_ABOUT_WIDTH 472
-#define UI_TOP_MENU_WIDTH 48
+#define UI_TOP_MENU_COLUMNS 6
+#define UI_TOP_MENU_WIDTH (UI_FONT_WIDTH * UI_TOP_MENU_COLUMNS)
 #define UI_MIN_HEIGHT 540
 #define UI_MIN_WIDTH 760
 #define UI_CAROUSEL_CELL 132
@@ -101,6 +116,51 @@
 #define PIXUI_SHIFT 2
 #define PIXUI_ALT 4
 #define PIXUI_LEFT_BUTTON 1
+#define PIXUI_WHEEL_SCROLL_X -1
+#define PIXUI_WHEEL_SCROLL_Y 1
+#define UI_FONT_MAX_WIDTH 32
+#define UI_FONT_MAX_HEIGHT 128
+#define UI_FONT_MAX_SCALED_WIDTH 128
+#define UI_COLOR_CHANNEL_MAX 255
+#define UI_COLOR_CHANNEL_BITS 8
+#define UI_THEME_FONT_PREFIX "FONT_"
+#define UI_THEME_SIZE_SUFFIX "_SIZE"
+#define UI_THEME_COLOR_SUFFIX "_COLOR"
+#define UI_THEME_DEFAULT_FONT "default"
+#define UI_THEME_FONT_HEIGHT "_DEFAULT_H"
+#define UI_THEME_FONT_WIDTH "_DEFAULT_W"
+#define UI_THEME_FONT_START "_START_CHAR"
+#define UI_THEME_FONT_END "_END_CHAR"
+#define UI_THEME_FONT_LINE "_LINE_"
+
+enum PixUIColor {
+    PIXUI_COLOR_FACE,PIXUI_COLOR_LIGHT,PIXUI_COLOR_SHADOW,PIXUI_COLOR_DARK,
+    PIXUI_COLOR_TITLE,PIXUI_COLOR_DESKTOP,PIXUI_COLOR_SELECTED,PIXUI_COLOR_DISABLED,PIXUI_COLOR_COUNT
+};
+
+enum PixUIFontRole {
+    PIXUI_FONT_LABEL,PIXUI_FONT_HEADER,PIXUI_FONT_TEXT,PIXUI_FONT_COUNT
+};
+
+struct PixUIBitmapFont {
+    int width = UI_DEFAULT_FONT_WIDTH,height = UI_DEFAULT_FONT_HEIGHT; // unscaled monospace cell dimensions
+    std::vector<uint32_t> rows; // glyph-major rows, least significant bit is the leftmost pixel
+};
+
+struct PixUIFont {
+    int width = UI_DEFAULT_FONT_WIDTH,height = UI_DEFAULT_FONT_HEIGHT; // rendered cell dimensions
+    unsigned color = 0; // normal foreground color for this role
+    std::shared_ptr<PixUIBitmapFont> bitmap; // shared custom source; null selects the built-in font
+    std::vector<uint8_t> cache; // scaled glyph pixels, empty at the source's native size
+};
+
+struct PixUITheme {
+    unsigned colors[PIXUI_COLOR_COUNT] = {0xc0c0c0,0xffffff,0x808080,0x000000,0x0000c0,0xffffff,0x000080,0x606060}; // original UI palette
+    PixUIFont fonts[PIXUI_FONT_COUNT] = {{UI_DEFAULT_FONT_WIDTH,UI_DEFAULT_FONT_HEIGHT,0x000000},{UI_DEFAULT_FONT_WIDTH,UI_DEFAULT_FONT_HEIGHT,0xffffff},{UI_DEFAULT_FONT_WIDTH,UI_DEFAULT_FONT_HEIGHT,0x000000}}; // label, header and editor styles
+};
+
+extern PixUITheme pixui_theme;
+bool pixui_load_theme(const std::string &path, std::string &error);
 
 struct PixUIRect {
     int x = 0,y = 0; // client-space origin
@@ -114,7 +174,7 @@ enum PixUIEventType {
 enum PixUIKey {
     PIXUI_RETURN = PIXUI_SPECIAL_KEY,PIXUI_ESCAPE,PIXUI_TAB,PIXUI_BACKSPACE,PIXUI_DELETE,
     PIXUI_LEFT,PIXUI_RIGHT,PIXUI_HOME,PIXUI_END,PIXUI_UP_KEY,PIXUI_DOWN_KEY,
-    PIXUI_F3,PIXUI_F4,PIXUI_F5
+    PIXUI_F3,PIXUI_F4,PIXUI_F5,PIXUI_F2,PIXUI_F11
 };
 
 struct PixUIEvent {
@@ -189,7 +249,7 @@ public:
     virtual bool maximized() const = 0;
     virtual void window_title(const std::string &title) = 0;
     void bevel(const PixUIRect &rect, bool inset, bool fill = true);
-    void text(int x, int y, const std::string &value, unsigned color);
+    void text(int x, int y, const std::string &value, unsigned color, PixUIFontRole role = PIXUI_FONT_LABEL);
     void button(const PixUIRect &rect, const std::string &label, bool pressed);
     bool event(PixUIForm &form, const PixUIEvent &input);
     void release_capture();
@@ -252,7 +312,7 @@ public:
 
     void draw() override;
 
-    unsigned color = COLOR_FACE; // background color
+    unsigned color = UI_COLOR_FACE; // background color
     bool background = true; // paint a background before the border
     bool border = true; // draw the retro bevel
     bool inset = false; // sunken border when true
@@ -267,8 +327,9 @@ public:
     bool needs_repaint() override;
 
     std::string caption; // displayed UTF-8 label
-    unsigned color = COLOR_DARK; // text color
-    unsigned background_color = COLOR_LIGHT; // optional label background
+    PixUIFontRole font_role = PIXUI_FONT_LABEL; // labels and window titles select their own font metrics
+    unsigned color = pixui_theme.fonts[PIXUI_FONT_LABEL].color; // text color
+    unsigned background_color = UI_COLOR_LIGHT; // optional label background
     bool background = false; // fill the label area before drawing
     bool centered = false; // center text horizontally and vertically
     bool wrap = false; // wrap caption to the available width
@@ -276,7 +337,7 @@ public:
 
 private:
     std::string painted_caption; // last caption observed by the invalidation scan
-    unsigned painted_color = COLOR_DARK; // last text color observed by the scan
+    unsigned painted_color = UI_COLOR_DARK; // last text color observed by the scan
 };
 
 class PixUIButton : public PixUILabel
@@ -376,6 +437,11 @@ class PixUIEdit : public PixUIMemo
 public:
     explicit PixUIEdit(PixUICanvas &context, PixUIEditor* state = nullptr);
     PixUIEdit(PixUICanvas &context, PixUIEditor &state);
+
+    bool event(const PixUIEvent &input) override;
+
+    std::function<void()> increment; // spinbox action when the focused edit receives Up
+    std::function<void()> decrement; // spinbox action when the focused edit receives Down
 };
 
 class PixUIMenuItem : public PixUILabel
@@ -524,9 +590,9 @@ public:
     bool event(const PixUIEvent &input) override;
 
     std::string caption; // group heading
-    unsigned color = COLOR_LIGHT; // white group and tab-page background
+    unsigned color = UI_COLOR_LIGHT; // white group and tab-page background
     bool border = true; // draw the outlined group frame
-    int inset_x = UI_MARGIN,inset_top = UI_TITLE_HEIGHT,inset_bottom = UI_MARGIN; // client margins
+    int inset_x = UI_MARGIN,inset_top = UI_FONT_HEIGHT + UI_TITLE_PADDING,inset_bottom = UI_MARGIN; // client margins
     int content_width = 0,content_height = 0; // minimum content extent, also inferred from fixed placements
     int wheel_step = UI_LINE_HEIGHT; // vertical scroll increment
 
@@ -575,6 +641,7 @@ public:
     explicit PixUIImageView(PixUICanvas &context);
 
     void set_image(void* texture, int width, int height);
+    void draw() override;
     void layout() override;
 
     bool scaled = true; // fit image; native mode owns both scrollbars
@@ -688,7 +755,7 @@ class PixUIDialog : public PixUIForm
 public:
     explicit PixUIDialog(PixUICanvas &context, const std::string &caption, const std::string &accept = "", const std::string &cancel = UI_CANCEL_TEXT);
 
-    void center(const PixUIRect &client);
+    void center(const PixUIRect &client, const PixUIRect &area = {});
     void layout() override;
     void dismiss();
     virtual void accept();
@@ -713,10 +780,13 @@ protected:
     PixUIDialogLayout controls() const;
 
 private:
+    friend class PixUIForm;
+
     PixUILabel* resize_handle; // optional bottom-right sizing grip
     PixUIRect available; // latest containing client rectangle
-    bool positioned = false,resizing = false; // preserve resized placement and pointer capture state
+    bool positioned = false,resizing = false,moving = false; // preserve placement and resize or movement capture
     int resize_x = 0,resize_y = 0,resize_width = 0,resize_height = 0; // pointer and dimensions at drag start
+    int move_x = 0,move_y = 0; // last pointer position during title-bar movement
 };
 
 class PixUIMessageDialog : public PixUIDialog
@@ -737,7 +807,7 @@ public:
 
     void layout() override;
 
-private:
+protected:
     PixUIImage* icon; // borrowed application portrait
     std::vector<PixUILabel*> lines; // owned About captions
 };

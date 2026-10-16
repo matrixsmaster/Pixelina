@@ -14,28 +14,27 @@
 #include <array>
 #include <atomic>
 
-#define PIXELINA_VERSION "0.3"
-#define PIXELINA_ABOUT { PIXELINA_NAME " " PIXELINA_VERSION, "(C) Dmitry 'sciloaf' Solovyev, 2026", "Z-Image Turbo image generation", "Qwen Image 2.1 image editing" }
+#define PIXELINA_VERSION "0.4"
 
 #define UI_CAPTION_SEPARATOR " - "
-#define UI_ABOUT_PREFIX "About "
 #define UI_IMAGE_TITLE "Image"
 #define UI_STATUS_BUFFER 64
 #define UI_IMAGE_EXTENSIONS {".jpg",".jpeg",".jpe",".png",".bmp",".tga",".psd",".gif",".hdr",".pic",".pnm",".ppm",".pgm"}
 #define UI_LEFT_FRACTION 0.32f
 #define UI_PROMPT_FRACTION 0.30f
 #define UI_CAROUSEL_FRACTION 0.24f
-#define UI_STATUS_HEIGHT 26
+#define UI_STATUS_HEIGHT (UI_LINE_HEIGHT + UI_TEXT_PADDING * 2 + UI_BORDER_WIDTH)
 #define UI_SPLITTER_WIDTH 6
 #define UI_PANEL_MIN 140
 #define UI_WORK_TOP (UI_FRAME + UI_WINDOW_TITLE_HEIGHT + UI_MENU_HEIGHT)
 #define UI_TOP_MENU_COUNT 4
-#define UI_FIELD_INPUT_Y 18
+#define UI_FIELD_INPUT_Y (UI_FONT_HEIGHT + UI_MARGIN + UI_BORDER_WIDTH)
 #define UI_FRAME_DELAY 16
 #define UI_SETTINGS_COUNT 8
 #define UI_EDIT_SETTINGS_COUNT 9
 #define UI_SETTINGS_PAGES 2
 #define UI_SETTINGS_FOOTER (UI_FIELD_HEIGHT * 2 + UI_MARGIN)
+#define UI_CONFIG_THEME "theme"
 #define UI_CONFIG_BACKEND "backend"
 #define UI_CONFIG_FORMAT "format"
 #define UI_CONFIG_AUTO_SEED "auto_seed"
@@ -55,17 +54,18 @@
 #define UI_CONFIG_MAXIMIZED "window_maximized"
 #define UI_SETTINGS_MIN_WIDTH 240
 #define UI_INVALID_EDIT_NUMBERS "Seed, dimensions, steps and reference resolution must be valid numbers."
-#define UI_SETTINGS_ROW 48
+#define UI_SETTINGS_ROW (UI_FIELD_INPUT_Y + UI_FIELD_HEIGHT + UI_TEXT_PADDING + UI_BORDER_WIDTH)
 #define UI_BROWSE_BUTTON_WIDTH 32
 #define UI_MODEL_FIRST UI_DIFFUSER_FIELD
 #define UI_GENERATE_TEXT "Generate"
 #define UI_INVALID_NUMBERS "Seed, dimensions, steps and shift must be valid numbers."
 #define UI_STOPPED_TEXT "Generation stopped"
 #define UI_READY_TEXT "Ready"
+#define UI_SPIN_BUTTON_WIDTH UI_SCROLLBAR
 
 enum PixelinaCommand {
     CMD_OPEN = 1,CMD_SAVE,CMD_SAVE_AS,CMD_QUIT,CMD_GENERATE,CMD_SCALED,CMD_ABOUT,
-    CMD_JPG,CMD_PNG,CMD_CPU,CMD_VULKAN,CMD_DECODE,CMD_OPEN_IMAGE,CMD_CLEAR,CMD_AUTO_SEED,CMD_GLOBAL_DB,CMD_MULTI_REFERENCE,CMD_CHAT
+    CMD_JPG,CMD_PNG,CMD_CPU,CMD_VULKAN,CMD_DECODE,CMD_OPEN_IMAGE,CMD_CLEAR,CMD_AUTO_SEED,CMD_GLOBAL_DB,CMD_MULTI_REFERENCE,CMD_CHAT,CMD_BOOKMARK,CMD_UNBOOKMARK,CMD_FULLSCREEN
 };
 
 enum PixelinaGroup {
@@ -83,6 +83,10 @@ enum PixelinaField {
 
 enum PixelinaPage {
     UI_GENERATE_PAGE,UI_EDIT_PAGE
+};
+
+enum PixelinaImagePage {
+    UI_IMAGES_PAGE,UI_BOOKMARKS_PAGE
 };
 
 enum PixelinaEditField {
@@ -103,15 +107,20 @@ class PixelinaForm : public PixUIForm
 {
 public:
     explicit PixelinaForm(PixUICanvas &context);
+    void create_controls();
     void layout() override;
+    void draw() override;
 
     std::string caption = PIXELINA_NAME; // application window caption
+    bool fullscreen = false; // expand only the image widget to the client bounds
     PixUIMemo* prompt; // prompt editor owned by its group
     std::array<PixUIEdit*,UI_SETTINGS_COUNT> fields; // owned settings editors
     std::array<PixUIButton*,UI_SETTINGS_COUNT> browse = {}; // model selection actions
     PixUILabel* preferences; // backend and format label
     PixUIButton* generate; // generation action
     PixUICarousel* carousel; // complete saved-image widget
+    PixUICarousel* bookmarks; // complete global bookmarked-image widget
+    PixTab* image_tabs; // Images and Bookmarks pages above the current image
     PixUIImageView* image; // complete image widget
     PixUIStatusBar* status; // complete status widget
     PixTab* tabs; // owned settings tab control
@@ -119,9 +128,12 @@ public:
     std::array<PixUIEdit*,UI_EDIT_SETTINGS_COUNT> edit_fields; // owned Edit editors
     std::array<PixUIButton*,UI_EDIT_SETTINGS_COUNT> edit_browse = {}; // Edit model selection actions
     std::array<PixUIButton*,UI_SETTINGS_PAGES> random_seed = {}; // seed randomization actions
+    std::vector<PixUIButton*> dimension_buttons; // dimension increment and decrement actions
     float left_fraction = UI_LEFT_FRACTION,prompt_fraction = UI_PROMPT_FRACTION,carousel_fraction = UI_CAROUSEL_FRACTION; // persistent pane ratios
 
 private:
+    friend class Pixelina;
+
     PixUIPanel* menu_background; // full-width menu background
     std::array<PixUIGroupBox*,UI_GROUP_COUNT> groups; // workspace containers
     std::array<PixUISplitter*,UI_SPLITTER_COUNT> splitters; // owned pane dividers
@@ -136,14 +148,11 @@ public:
     int run();
 
 private:
-    friend struct PixelinaTest;
-
     PixUISDLCanvas canvas; // shared renderer and control capture
     PixelinaForm main_form{canvas}; // owns persistent workspace controls
     PixUIMenu* menus = nullptr; // borrowed menu root owned by main_form
     SDL_Renderer* renderer = nullptr; // SDL renderer owned by the application
     SDL_Window* window = nullptr; // outer resizable window
-    SDL_Texture* app_icon = nullptr; // embedded application icon for the About dialog
     SDL_Texture* current = nullptr; // current full-resolution image texture
     SDL_Thread* worker = nullptr; // image generation worker
     SDL_mutex* mutex = nullptr; // worker-result synchronization
@@ -174,10 +183,13 @@ private:
     bool global_db = false; // select the user database instead of the directory database
     bool initialized = false; // save configuration only after successful initialization
     std::string user_directory; // persistent configuration and global database directory
+    std::string theme_path; // configured theme filename retained when saving settings
     std::string workdir; // selected output image directory
     PixSettings settings; // generation values
     std::vector<PixRecord> records; // versioned database entries
     std::vector<std::string> images; // supported image files in the current directory
+    std::vector<std::string> bookmarks; // global absolute bookmarked image paths
+    int bookmark_selection = -1; // explicitly selected bookmark eligible for removal
     std::string dialog_message; // modal message text
     int width = UI_START_WIDTH; // current client width
     int height = UI_START_HEIGHT; // current client height
@@ -200,6 +212,7 @@ private:
     bool open_image(const std::string &path);
     bool open_directory(const std::string &directory);
     bool select_image(size_t index);
+    void bookmark_image(bool remove);
     void save_image();
     void export_image(const std::string &destination);
     void generation_image(PixImage completed);

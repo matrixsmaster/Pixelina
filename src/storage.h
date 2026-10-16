@@ -23,6 +23,7 @@
 #define PIXELINA_EXT_PNG ".png"
 #define PIXELINA_DB "pixelina.txt"
 #define PIXELINA_USER_DIRECTORY ".pixelina"
+#define PIXELINA_BOOKMARKS "bookmarks.txt"
 #define PIXELINA_GLOBAL_DB "data.txt"
 #define PIXELINA_CONFIG "config.txt"
 #define PIXELINA_LOG_GEN_VERSION "$v1;"
@@ -108,6 +109,8 @@ bool database_parse(const std::string &text, std::vector<PixRecord> &records, st
 std::string database_record(const PixRecord &record);
 bool config_load(const std::string &directory, std::map<std::string,std::string> &values, std::string &error);
 bool config_save(const std::string &directory, const std::map<std::string,std::string> &values, std::string &error);
+bool bookmarks_load(const std::string &directory, std::vector<std::string> &paths, std::string &error);
+bool bookmarks_save(const std::string &directory, const std::vector<std::string> &paths, std::string &error);
 bool database_load(const std::string &directory, std::vector<PixRecord> &records, std::string &error, const std::string &database = {});
 bool storage_save(const std::string &directory, PixRecord &record, const PixImage &image, std::string &error, const std::string &database = {});
 bool image_decode(const unsigned char* bytes, size_t count, PixImage &image, std::string &error);
