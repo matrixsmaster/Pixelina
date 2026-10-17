@@ -54,14 +54,6 @@
 #define INFERENCE_ENCODER_FRACTION 0.15f
 #define INFERENCE_DIFFUSION_FRACTION 0.65f
 #define INFERENCE_VAE_FRACTION 0.20f
-#define WEIGHT_SUFFIX ".weight"
-#define BIAS_SUFFIX ".bias"
-
-#define VAE_NORM_SUFFIX ".norm"
-#define VAE_DECODER_PREFIX "decoder."
-#define VAE_MID_PREFIX "decoder.mid."
-#define VAE_ATTENTION_PREFIX "decoder.mid.attn_1"
-#define VAE_UP_PREFIX "decoder.up."
 
 struct PixRotary {
     std::vector<float> cosine; // one value per token/rotary pair

@@ -5,12 +5,12 @@
  * License: MIT
  */
 #include <algorithm>
-#include <cerrno>
-#include <climits>
-#include <cmath>
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
+#include <errno.h>
+#include <limits.h>
+#include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <iomanip>
 #include <limits>
 #include <random>
@@ -36,7 +36,7 @@ static int configuration_integer(const std::map<std::string,std::string> &values
     if (entry == values.end()) return fallback;
     char* end;
     errno = 0;
-    long value = std::strtol(entry->second.c_str(),&end,10);
+    long value = strtol(entry->second.c_str(),&end,10);
     if (end == entry->second.c_str() || *end || errno == ERANGE) return fallback;
     return int(value);
 }
@@ -59,7 +59,7 @@ void Pixelina::restore_configuration(const std::map<std::string,std::string> &va
     for (size_t i = 0; i < UI_SPLITTER_COUNT; i++) {
         auto entry = values.find(pane_configuration_keys[i]);
         float value;
-        if (entry != values.end() && parse_float(entry->second,value) && std::isfinite(value) && value > 0 && value < 1) *fractions[i] = value;
+        if (entry != values.end() && parse_float(entry->second,value) && isfinite(value) && value > 0 && value < 1) *fractions[i] = value;
     }
 }
 
@@ -96,7 +96,7 @@ void Pixelina::save_configuration()
         for (size_t i = 0; i < count; i++) values[std::string(page == UI_GENERATE_PAGE? UI_CONFIG_GENERATE_PREFIX : UI_CONFIG_EDIT_PREFIX) + std::to_string(i)] = (page == UI_GENERATE_PAGE? main_form.fields[i] : main_form.edit_fields[i])->model.text;
     }
     std::string error;
-    if (!config_save(user_directory,values,error)) std::fprintf(stderr,PIXELINA_NAME ": %s\n",error.c_str());
+    if (!config_save(user_directory,values,error)) fprintf(stderr,PIXELINA_NAME ": %s\n",error.c_str());
 }
 
 void Pixelina::switch_database()
@@ -111,7 +111,7 @@ void Pixelina::switch_database()
     records.swap(loaded);
 }
 
-bool Pixelina::initialize(const std::string &directory, bool png, std::string &error, bool default_directory, bool use_saved_directory)
+bool Pixelina::initialize(const std::string &directory, bool png, std::string &error, bool default_directory, bool use_saved_directory, const std::string &job_file)
 {
     char* cwd = getcwd(nullptr,0);
     if (!cwd) {
@@ -119,16 +119,16 @@ bool Pixelina::initialize(const std::string &directory, bool png, std::string &e
         return false;
     }
     launch_directory = cwd;
-    std::free(cwd);
+    free(cwd);
     PixUIFileBrowser::last_directory = launch_directory;
-    const char* home = std::getenv("HOME");
+    const char* home = getenv("HOME");
     if (!home || !home[0]) {
         error = "Cannot determine the home directory.";
         return false;
     }
     user_directory = path_join(home,PIXELINA_USER_DIRECTORY);
     if (mkdir(user_directory.c_str(),0700) && errno != EEXIST) {
-        error = "Cannot create configuration directory: " + std::string(std::strerror(errno));
+        error = "Cannot create configuration directory: " + std::string(strerror(errno));
         return false;
     }
     std::map<std::string,std::string> configuration;
@@ -158,7 +158,8 @@ bool Pixelina::initialize(const std::string &directory, bool png, std::string &e
     renderer = SDL_CreateRenderer(window,-1,SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
     if (!renderer) renderer = SDL_CreateRenderer(window,-1,SDL_RENDERER_SOFTWARE);
     mutex = SDL_CreateMutex();
-    if (!renderer || !mutex) {
+    pause_condition = SDL_CreateCond();
+    if (!renderer || !mutex || !pause_condition) {
         error = SDL_GetError();
         return false;
     }
@@ -184,13 +185,19 @@ bool Pixelina::initialize(const std::string &directory, bool png, std::string &e
         }
     }
     main_form.tabs->select(size_t(configuration_integer(configuration,UI_CONFIG_TAB,UI_GENERATE_PAGE)));
-    bool open_file = path_kind(directory) == PIX_PATH_FILE;
+    bool open_file = job_file.empty() && path_kind(directory) == PIX_PATH_FILE;
     std::string selected_directory = open_file? path_parent(path_normalize(directory)) : directory;
     auto saved_directory = configuration.find(UI_CONFIG_DIRECTORY);
     if (default_directory || use_saved_directory) {
         selected_directory = saved_directory != configuration.end() && !saved_directory->second.empty()? saved_directory->second : launch_directory;
     }
-    if (!open_directory(selected_directory)) {
+    if (!job_file.empty()) {
+        if (!queue_import(main_form,job_file)) {
+            error = dialog_message;
+            return false;
+        }
+        if (!queue.items.empty()) queue_start(main_form);
+    } else if (!open_directory(selected_directory)) {
         error = dialog_message;
         return false;
     }
@@ -208,12 +215,19 @@ bool Pixelina::initialize(const std::string &directory, bool png, std::string &e
 Pixelina::~Pixelina()
 {
     stop_requested = true;
+    if (mutex && pause_condition) {
+        SDL_LockMutex(mutex);
+        pause_requested = false;
+        SDL_CondBroadcast(pause_condition);
+        SDL_UnlockMutex(mutex);
+    }
     if (worker) SDL_WaitThread(worker,nullptr);
     if (initialized) save_configuration();
     canvas.release_capture();
     main_form.clear();
     canvas.set_main_image(nullptr,nullptr);
     if (current) SDL_DestroyTexture(current);
+    if (pause_condition) SDL_DestroyCond(pause_condition);
     if (mutex) SDL_DestroyMutex(mutex);
     if (renderer) SDL_DestroyRenderer(renderer);
     if (window) SDL_DestroyWindow(window);
@@ -228,7 +242,7 @@ bool Pixelina::open_directory(const std::string &directory)
         return false;
     }
     std::string actual = canonical;
-    std::free(canonical);
+    free(canonical);
     std::vector<PixDirEntry> listing;
     std::vector<PixRecord> loaded;
     std::string error;
@@ -274,7 +288,7 @@ void Pixelina::layout()
     }
     main_form.tabs->selection_enabled = !busy;
     for (PixUIButton* button : main_form.random_seed) button->enabled = !busy;
-    for (PixUIButton* button : main_form.dimension_buttons) button->enabled = !busy;
+    for (PixUIButton* button : main_form.spin_buttons) button->enabled = !busy;
     main_form.generate->caption = busy? (stop_requested? UI_STOPPING_TEXT : "Stop [F5]") : "Generate [F5]";
     main_form.preferences->caption = settings.backend + " / " + settings.format;
     main_form.carousel->enabled = !busy;
@@ -282,13 +296,10 @@ void Pixelina::layout()
     main_form.image->set_image(current,image.width,image.height);
     main_form.groups[UI_IMAGE_GROUP]->caption = image.width > 0 && image.height > 0? UI_IMAGE_TITLE " (" + std::to_string(image.width) + "x" + std::to_string(image.height) + ")" : UI_IMAGE_TITLE;
     char timing[UI_STATUS_BUFFER];
-    if (busy && generation_progress > 0 && generation_progress < 1) {
-        double elapsed = double(canvas.ticks() - generation_started) / 1000;
-        double remaining = elapsed * (1 - generation_progress) / generation_progress;
-        uint64_t seconds = uint64_t(remaining);
-        std::snprintf(timing,sizeof(timing),"ETA %llum %02llus",static_cast<unsigned long long>(seconds / 60),static_cast<unsigned long long>(seconds % 60));
-    } else if (busy) std::snprintf(timing,sizeof(timing),generation_progress >= 1? "ETA 0s" : "ETA --");
-    else if (generation_seconds > 0) std::snprintf(timing,sizeof(timing),"%.2fs",generation_seconds);
+    if (busy) {
+        uint64_t seconds = queue.active == UI_QUEUE_NO_TASK? (canvas.ticks() - generation_started) / 1000 : uint64_t(queue.items[queue.active].seconds);
+        snprintf(timing,sizeof(timing),"%llum %02llus",(unsigned long long)(seconds / 60),(unsigned long long)(seconds % 60));
+    } else if (generation_seconds > 0) snprintf(timing,sizeof(timing),"%.2fs",generation_seconds);
     else timing[0] = 0;
     main_form.status->set_status(status,std::to_string(images.size()) + " images",timing,busy,generation_progress);
     main_form.layout();
@@ -448,8 +459,8 @@ void Pixelina::randomize_seed(size_t page)
 
 void Pixelina::reference_resolution()
 {
-    double side = std::sqrt(double(image.width) * image.height);
-    edit_settings.reference_resolution = std::max(QWEN_IMAGE_MULTIPLE,int(std::round(side / QWEN_IMAGE_MULTIPLE)) * QWEN_IMAGE_MULTIPLE);
+    double side = sqrt(double(image.width) * image.height);
+    edit_settings.reference_resolution = std::max(QWEN_IMAGE_MULTIPLE,int(round(side / QWEN_IMAGE_MULTIPLE)) * QWEN_IMAGE_MULTIPLE);
     main_form.edit_fields[UI_EDIT_RESOLUTION]->set_text(std::to_string(edit_settings.reference_resolution));
 }
 
@@ -463,9 +474,8 @@ bool Pixelina::open_image(const std::string &path)
         message(error.empty()? "Cannot open image: " + actual : error);
         return false;
     }
-    SDL_Texture* texture = SDL_CreateTexture(renderer,SDL_PIXELFORMAT_RGB24,SDL_TEXTUREACCESS_STATIC,loaded.width,loaded.height);
-    if (!texture || SDL_UpdateTexture(texture,nullptr,loaded.rgb.data(),loaded.width * 3)) {
-        if (texture) SDL_DestroyTexture(texture);
+    SDL_Texture* texture = canvas.create_texture(loaded);
+    if (!texture) {
         message(SDL_GetError());
         return false;
     }
@@ -508,10 +518,10 @@ bool Pixelina::open_image(const std::string &path)
     return true;
 }
 
-void Pixelina::message(const std::string &value)
+void Pixelina::message(const std::string &value, PixUIForm* owner)
 {
     dialog_message = value;
-    main_form.present(std::make_unique<PixUIMessageDialog>(canvas,value,PIXELINA_NAME));
+    (owner? *owner : main_form).present(std::make_unique<PixUIMessageDialog>(canvas,value,PIXELINA_NAME));
 }
 
 bool Pixelina::select_image(size_t index)
@@ -550,24 +560,26 @@ void Pixelina::bookmark_image(bool remove)
     }
 }
 
-void Pixelina::save_image()
+bool Pixelina::save_image()
 {
-    if (busy) return;
+    if (busy) return false;
     if (!image_has_record) {
         message(image.rgb.empty()? "Generate an image first." : "This image has no generation record. Use Save as to export it.");
-        return;
+        return false;
     }
     if (!unsaved) {
         message("This image is already in the database. Use Save as to export it.");
-        return;
+        return false;
     }
     PixRecord record = image_record;
-    if (record.model == PIX_MODEL_Z_IMAGE) record.settings.format = settings.format;
-    else record.edit_settings.format = settings.format;
+    if (queue.active == UI_QUEUE_NO_TASK) {
+        if (record.model == PIX_MODEL_Z_IMAGE) record.settings.format = settings.format;
+        else record.edit_settings.format = settings.format;
+    }
     std::string error;
     if (!storage_save(workdir,record,image,error,global_db? path_join(user_directory,PIXELINA_GLOBAL_DB) : std::string{})) {
         message(error);
-        return;
+        return false;
     }
     image_record = record;
     image_source_path = path_normalize(path_join(workdir,record.filename));
@@ -579,6 +591,7 @@ void Pixelina::save_image()
     main_form.carousel->select(int(std::find(images.begin(),images.end(),filename) - images.begin()));
     unsaved = false;
     status = "Saved " + record.filename;
+    return true;
 }
 
 void Pixelina::export_image(const std::string &destination)
@@ -603,14 +616,25 @@ void Pixelina::generation_job(const PixJobInference &inference)
 {
     std::string error;
     PixImage result;
+    std::string last_stage;
     Uint64 start = SDL_GetPerformanceCounter();
     auto progress = [&](float fraction, const std::string &stage) {
         if (stop_requested) return false;
         SDL_LockMutex(mutex);
         worker_progress = fraction;
         worker_stage = stage;
+        last_stage = stage;
+        if (pause_requested && !stop_requested) {
+            worker_paused = true;
+            worker_pause_started = SDL_GetPerformanceCounter();
+            while (pause_requested && !stop_requested) SDL_CondWait(pause_condition,mutex);
+            worker_pause_seconds += double(SDL_GetPerformanceCounter() - worker_pause_started) / SDL_GetPerformanceFrequency();
+            worker_paused = false;
+            worker_pause_started = 0;
+        }
+        bool proceed = !stop_requested;
         SDL_UnlockMutex(mutex);
-        return true;
+        return proceed;
     };
     int code = 0;
     auto decode_enabled = [&]() { return decode_on_the_go.load(); };
@@ -628,17 +652,16 @@ void Pixelina::generation_job(const PixJobInference &inference)
     case INFERENCE_ERROR_SETTINGS:
         if (job.parameters.model == PIX_MODEL_Z_IMAGE) settings_valid(job.generate_settings,error);
         else edit_settings_valid(job.edit_settings,error);
-        if (error.empty()) error = worker_stage;
+        if (error.empty()) error = last_stage;
         break;
     case INFERENCE_ERROR_MODEL:
         error = "Cannot load models or unsupported model tensors/tokenizer.";
-        if (job.parameters.model == PIX_MODEL_QWEN_IMAGE) error += "\n" + worker_stage;
         break;
     case INFERENCE_ERROR_PROMPT:
         error = "Invalid prompt, context exceeded, or text encoding failed.";
         break;
     case INFERENCE_ERROR_NUMERICAL:
-        error = "Generation failed during diffusion or VAE decoding.";
+        error = "Inference produced an empty or invalid tensor/image, or non-finite values.";
         break;
     case INFERENCE_ERROR_VULKAN:
         error = "Vulkan backend unavailable or image exceeds device limits.";
@@ -647,12 +670,17 @@ void Pixelina::generation_job(const PixJobInference &inference)
         error = UI_STOPPED_TEXT;
         break;
     case INFERENCE_ERROR_MEMORY:
-        error = worker_stage;
+        error = last_stage;
         break;
     default:
+        if (code) error = "Unknown inference failure.";
         break;
     }
-    double seconds = double(SDL_GetPerformanceCounter() - start) / SDL_GetPerformanceFrequency();
+    if (code && code != INFERENCE_ERROR_STOPPED && !stop_requested) {
+        if (!last_stage.empty() && error != last_stage) error += "\nLast stage: " + last_stage;
+        error += "\nInference error code: " + std::to_string(code);
+    }
+    double seconds = double(SDL_GetPerformanceCounter() - start) / SDL_GetPerformanceFrequency() - worker_pause_seconds;
     SDL_LockMutex(mutex);
     worker_message = error;
     worker_image = std::move(result);
@@ -685,11 +713,16 @@ void Pixelina::action(int command)
         return;
     }
     if (busy && command == CMD_GENERATE) {
+        if (queue.active != UI_QUEUE_NO_TASK) {
+            queue_stop(main_form);
+            return;
+        }
         stop_requested = true;
         status = UI_STOPPING_TEXT;
         return;
     }
     if (command == CMD_DECODE) {
+        if (queue.active != UI_QUEUE_NO_TASK) return;
         decode_on_the_go = !decode_on_the_go.load();
         return;
     }
@@ -788,6 +821,9 @@ void Pixelina::action(int command)
         main_form.present(std::move(browser));
         break;
     }
+    case CMD_RELOAD_DIR:
+        open_directory(workdir);
+        break;
     case CMD_SAVE:
         save_image();
         break;
@@ -803,7 +839,7 @@ void Pixelina::action(int command)
             browser->selected = [this](const std::string &path) {
                 std::string destination = path_join(workdir,path);
                 if (path_kind(destination) != PIX_PATH_MISSING) {
-                    auto confirmation = std::make_unique<PixUIMessageDialog>(canvas,"Overwrite existing file?\n" + destination,PIXELINA_NAME,"Overwrite",UI_CANCEL_TEXT);
+                    auto confirmation = std::make_unique<PixUIMessageDialog>(canvas,UI_OVERWRITE_FILE_TEXT + destination,PIXELINA_NAME,UI_OVERWRITE_TEXT,UI_CANCEL_TEXT);
                     confirmation->accepted = [this,destination]() { export_image(destination); };
                     main_form.present(std::move(confirmation));
                 } else export_image(destination);
@@ -829,26 +865,304 @@ void Pixelina::action(int command)
         break;
     case CMD_GENERATE: {
         if (!capture_job()) return;
-        stop_requested = false;
-        worker_done = false;
-        worker_progress = 0;
-        generation_progress = 0;
-        worker_stage = "Loading models";
-        worker_message.clear();
-        worker_preview = PixImage();
-        busy = true;
-        generation_started = canvas.ticks();
-        status = "Generating";
-        worker = SDL_CreateThread(generation_worker,PIXELINA_NAME " generation",this);
-        if (!worker) {
-            busy = false;
-            message(SDL_GetError());
-        } else if (auto_seed) randomize_seed(main_form.tabs->selected());
+        if (start_generation() && auto_seed) randomize_seed(main_form.tabs->selected());
         break;
     }
     default:
         break;
     }
+}
+
+bool Pixelina::start_generation()
+{
+    stop_requested = false;
+    pause_requested = false;
+    worker_paused = false;
+    worker_pause_seconds = 0;
+    worker_pause_started = 0;
+    worker_done = false;
+    worker_progress = 0;
+    generation_progress = 0;
+    worker_stage = UI_QUEUE_LOADING_TEXT;
+    worker_message.clear();
+    worker_image = PixImage();
+    worker_preview = PixImage();
+    busy = true;
+    generation_started = canvas.ticks();
+    status = "Generating";
+    worker = SDL_CreateThread(generation_worker,PIXELINA_NAME " generation",this);
+    if (worker) return true;
+    busy = false;
+    message(SDL_GetError());
+    return false;
+}
+
+void Pixelina::queue_add()
+{
+    if (menus) menus->dismiss();
+    if (busy || !capture_job()) return;
+    PixQueueItem item;
+    item.source = queue_source_thumbnail(job.references);
+    item.description = queue_job_description(job);
+    item.job = std::move(job);
+    queue.items.push_back(std::move(item));
+    queue.revision++;
+    if (auto_seed) randomize_seed(main_form.tabs->selected());
+    status = "Added job to queue";
+}
+
+void Pixelina::queue_view()
+{
+    auto browser = std::make_unique<PixelinaQueueDialog>(canvas,queue);
+    PixelinaQueueDialog* dialog = browser.get();
+    browser->clear_button->activate = [this,dialog]() {
+        auto confirmation = std::make_unique<PixUIMessageDialog>(canvas,"Are you sure?",UI_QUEUE_CLEAR_TEXT,"Yes","No");
+        PixUIMessageDialog* prompt = confirmation.get();
+        confirmation->accepted = [this,prompt]() {
+            prompt->dismiss();
+            queue_clear();
+        };
+        dialog->present(std::move(confirmation));
+    };
+    browser->start_button->activate = [this,dialog]() { queue_start(*dialog); };
+    browser->stop_button->activate = [this,dialog]() { queue_stop(*dialog); };
+    browser->pause_button->activate = [this,dialog]() { queue_pause(*dialog); };
+    browser->import_button->activate = [this,dialog]() { queue_import(*dialog); };
+    browser->export_button->activate = [this,dialog]() { queue_export(*dialog); };
+    main_form.present(std::move(browser));
+}
+
+bool Pixelina::queue_import(PixUIForm &owner, const std::string &path)
+{
+    if (path.empty()) {
+        auto selection = std::make_unique<PixUIFileBrowser>(canvas);
+        selection->title = UI_QUEUE_IMPORT_TEXT;
+        selection->selected = [this,&owner](const std::string &path) { return queue_import(owner,path); };
+        selection->refresh();
+        owner.present(std::move(selection));
+        return true;
+    }
+    if (busy && queue.active == UI_QUEUE_NO_TASK) {
+        message("Another generation is running. Stop it before importing jobs.",&owner);
+        return false;
+    }
+    queue_clear();
+    if (busy) {
+        queue_import_path = path;
+        return true;
+    }
+    std::string directory,error;
+    std::vector<PixRecord> parameters;
+    if (!job_file_load(path,directory,parameters,error)) {
+        message(error,&owner);
+        return false;
+    }
+    if (!open_directory(directory)) return false;
+    std::vector<PixQueueItem> imported;
+    for (PixRecord &record : parameters) {
+        PixQueueItem item;
+        record.filename.clear();
+        item.job.parameters = std::move(record);
+        if (item.job.parameters.model == PIX_MODEL_QWEN_IMAGE) {
+            item.job.edit_settings = item.job.parameters.edit_settings;
+            PixEditSettings &s = item.job.edit_settings;
+            s.diffuser = path_join(launch_directory,s.diffuser);
+            s.encoder = path_join(launch_directory,s.encoder);
+            s.vision = path_join(launch_directory,s.vision);
+            s.vae = path_join(launch_directory,s.vae);
+            for (const std::string &reference_path : item.job.parameters.references) {
+                PixImage reference;
+                if (!image_load(reference_path,reference,error)) {
+                    message(error,&owner);
+                    return false;
+                }
+                item.job.references.push_back(std::move(reference));
+            }
+        } else {
+            item.job.generate_settings = item.job.parameters.settings;
+            PixSettings &s = item.job.generate_settings;
+            s.diffuser = path_join(launch_directory,s.diffuser);
+            s.encoder = path_join(launch_directory,s.encoder);
+            s.vae = path_join(launch_directory,s.vae);
+        }
+        item.source = queue_source_thumbnail(item.job.references);
+        item.description = queue_job_description(item.job);
+        imported.push_back(std::move(item));
+    }
+    queue.items.swap(imported);
+    queue.revision++;
+    status = "Imported jobs from " + path;
+    layout();
+    return true;
+}
+
+void Pixelina::queue_export(PixUIForm &owner)
+{
+    auto save = [this,&owner](const std::string &path) {
+        std::vector<PixRecord> parameters;
+        for (size_t i = 0; i < queue.items.size(); i++) {
+            const PixQueueItem &item = queue.items[i];
+            if (item.state == PIX_QUEUE_COMPLETE) continue;
+            const PixJob &source = i == queue.active? job : item.job;
+            if (source.references.size() != source.parameters.references.size()) {
+                message("Save the reference image and add the job again before exporting it.",&owner);
+                return;
+            }
+            parameters.push_back(source.parameters);
+        }
+        std::string error;
+        if (!job_file_save(path,workdir,parameters,error)) message(error,&owner);
+        else status = "Exported jobs to " + path;
+    };
+    auto selection = std::make_unique<PixUIFileBrowser>(canvas,path_join(PixUIFileBrowser::last_directory,"jobs.txt"));
+    selection->title = UI_QUEUE_EXPORT_TEXT;
+    selection->accept_caption = UI_SAVE_TEXT;
+    selection->hint_text = "Saves unfinished jobs for later execution.";
+    selection->show_listing = false;
+    selection->selected = [this,&owner,save](const std::string &path) {
+        if (path_kind(path) != PIX_PATH_MISSING) {
+            auto confirmation = std::make_unique<PixUIMessageDialog>(canvas,UI_OVERWRITE_FILE_TEXT + path,PIXELINA_NAME,UI_OVERWRITE_TEXT,UI_CANCEL_TEXT);
+            confirmation->accepted = [save,path]() { save(path); };
+            owner.present(std::move(confirmation));
+        } else save(path);
+        return true;
+    };
+    owner.present(std::move(selection));
+}
+
+void Pixelina::queue_start(PixUIForm &owner)
+{
+    if (busy && stop_requested) {
+        message(UI_QUEUE_STOPPING_ERROR,&owner);
+        return;
+    }
+    if (busy) {
+        if (queue.active == UI_QUEUE_NO_TASK) {
+            message("Another generation is running. Stop it before starting the queue.",&owner);
+            return;
+        }
+        if (!queue.pausing && !queue.paused) {
+            message("The queue is already running.",&owner);
+            return;
+        }
+        SDL_LockMutex(mutex);
+        pause_requested = false;
+        SDL_CondBroadcast(pause_condition);
+        SDL_UnlockMutex(mutex);
+        queue.pausing = queue.paused = false;
+        queue.revision++;
+        return;
+    }
+    for (const PixQueueItem &item : queue.items) {
+        if (item.state == PIX_QUEUE_COMPLETE) continue;
+        queue.pausing = queue.paused = false;
+        queue.running = true;
+        queue_next();
+        return;
+    }
+    message("There are no unfinished jobs in the queue.",&owner);
+}
+
+void Pixelina::queue_pause(PixUIForm &owner)
+{
+    if (!queue.running) {
+        message(UI_QUEUE_NOT_RUNNING_ERROR,&owner);
+        return;
+    }
+    if (stop_requested) {
+        message(UI_QUEUE_STOPPING_ERROR,&owner);
+        return;
+    }
+    if (queue.pausing || queue.paused) {
+        message("The queue is already paused or pausing.",&owner);
+        return;
+    }
+    if (queue.active == UI_QUEUE_NO_TASK) {
+        message(UI_QUEUE_NOT_RUNNING_ERROR,&owner);
+        return;
+    }
+    SDL_LockMutex(mutex);
+    pause_requested = true;
+    SDL_UnlockMutex(mutex);
+    queue.pausing = true;
+    queue.revision++;
+}
+
+void Pixelina::queue_stop(PixUIForm &owner)
+{
+    if (!queue.running && queue.active == UI_QUEUE_NO_TASK) {
+        message(UI_QUEUE_NOT_RUNNING_ERROR,&owner);
+        return;
+    }
+    if (stop_requested && busy) {
+        message(UI_QUEUE_STOPPING_ERROR,&owner);
+        return;
+    }
+    queue.running = false;
+    queue.pausing = queue.paused = false;
+    if (!busy) status = UI_STOPPED_TEXT;
+    if (queue.active != UI_QUEUE_NO_TASK) {
+        stop_requested = true;
+        SDL_LockMutex(mutex);
+        pause_requested = false;
+        SDL_CondBroadcast(pause_condition);
+        SDL_UnlockMutex(mutex);
+        status = UI_STOPPING_TEXT;
+    }
+    queue.revision++;
+}
+
+void Pixelina::queue_clear()
+{
+    queue_import_path.clear();
+    queue.running = false;
+    queue.pausing = queue.paused = false;
+    if (queue.active != UI_QUEUE_NO_TASK) {
+        queue_clear_requested = true;
+        stop_requested = true;
+        SDL_LockMutex(mutex);
+        pause_requested = false;
+        SDL_CondBroadcast(pause_condition);
+        SDL_UnlockMutex(mutex);
+        status = UI_STOPPING_TEXT;
+    } else {
+        queue.items.clear();
+        queue.elapsed = 0;
+        queue.reset_revision++;
+        status = UI_QUEUE_CLEARED_TEXT;
+    }
+    queue.revision++;
+}
+
+void Pixelina::queue_next()
+{
+    if (!queue.running || busy) return;
+    for (size_t i = 0; i < queue.items.size(); i++) {
+        PixQueueItem &item = queue.items[i];
+        if (item.state == PIX_QUEUE_COMPLETE) continue;
+        if (queue.pausing || queue.paused) return;
+        queue.active = i;
+        item.state = PIX_QUEUE_RUNNING;
+        item.progress = 0;
+        item.seconds = 0;
+        item.error.clear();
+        queue.pausing = queue.paused = false;
+        job = std::move(item.job);
+        decode_on_the_go = false;
+        queue.revision++;
+        if (!start_generation()) {
+            item.job = std::move(job);
+            item.state = PIX_QUEUE_FAILED;
+            item.error = dialog_message;
+            queue.running = false;
+            queue.active = UI_QUEUE_NO_TASK;
+        }
+        return;
+    }
+    queue.running = false;
+    queue.pausing = queue.paused = false;
+    queue.revision++;
+    if (!queue.items.empty()) status = "Queue complete";
 }
 
 PixUIThumbCache Pixelina::load_thumbnail(const std::string &path)
@@ -860,11 +1174,7 @@ PixUIThumbCache Pixelina::load_thumbnail(const std::string &path)
         PixImage reduced = image_thumbnail(full);
         value.width = reduced.width;
         value.height = reduced.height;
-        value.texture = SDL_CreateTexture(renderer,SDL_PIXELFORMAT_RGB24,SDL_TEXTUREACCESS_STATIC,reduced.width,reduced.height);
-        if (value.texture && SDL_UpdateTexture(static_cast<SDL_Texture*>(value.texture),nullptr,reduced.rgb.data(),reduced.width * 3)) {
-            SDL_DestroyTexture(static_cast<SDL_Texture*>(value.texture));
-            value.texture = nullptr;
-        }
+        value.texture = canvas.create_texture(reduced);
     }
     value.missing = !value.texture;
     return value;
@@ -882,6 +1192,7 @@ void Pixelina::build_menus()
     }
     PixUIMenu* file = popups[0];
     file->add("Open dir",[this]() { action(CMD_OPEN); })->bind_shortcut('o',PIXUI_CTRL,"Ctrl+O");
+    file->add("Reload dir",[this]() { action(CMD_RELOAD_DIR); })->bind_shortcut('r',PIXUI_CTRL,"Ctrl+R");
     file->add("Open image",[this]() { action(CMD_OPEN_IMAGE); })->bind_shortcut('o',PIXUI_CTRL | PIXUI_SHIFT,"Ctrl+Shift+O");
     file->add(UI_SAVE_TEXT,[this]() { action(CMD_SAVE); })->bind_shortcut('s',PIXUI_CTRL,"Ctrl+S");
     file->add(UI_SAVE_AS_TEXT,[this]() { action(CMD_SAVE_AS); })->bind_shortcut('s',PIXUI_CTRL | PIXUI_SHIFT,"Ctrl+Shift+S");
@@ -894,6 +1205,9 @@ void Pixelina::build_menus()
     PixUIMenuItem* generate = edit->add(UI_GENERATE_TEXT,[this]() { action(CMD_GENERATE); });
     generate->bind_shortcut(PIXUI_F5,0,"F5");
     generate->caption_state = [this]() { return busy? UI_STOP_TEXT : UI_GENERATE_TEXT; };
+    PixUIMenuItem* add_queue = edit->add("Add to queue",[this]() { queue_add(); });
+    add_queue->bind_shortcut(PIXUI_F5,PIXUI_SHIFT,"Shift+F5");
+    add_queue->enabled_state = [this]() { return !busy; };
     PixUIMenu* preferences = edit->child(*edit->add("Preferences"));
     PixUIMenuItem* seed = preferences->add("Auto-seed",[this]() { action(CMD_AUTO_SEED); });
     seed->checkable = true;
@@ -901,6 +1215,28 @@ void Pixelina::build_menus()
     PixUIMenuItem* database = preferences->add("Use global DB",[this]() { action(CMD_GLOBAL_DB); });
     database->checkable = true;
     database->checked_state = [this]() { return global_db; };
+    PixUIMenu* themes = preferences->child(*preferences->add("Theme"));
+    PixUIMenuItem* none = themes->add("<none>",[this]() { switch_theme({}); });
+    none->checkable = true;
+    none->checked_state = [this]() { return theme_path.empty(); };
+    const std::string extension = UI_THEME_EXTENSION;
+    for (const std::string &directory : {std::string(UI_THEME_DIRECTORY),user_directory}) {
+        if (path_kind(directory) == PIX_PATH_MISSING) continue;
+        std::vector<PixDirEntry> entries;
+        std::string error;
+        if (!directory_list(directory,entries,error)) {
+            message(error);
+            continue;
+        }
+        for (const PixDirEntry &entry : entries) {
+            if (entry.directory || entry.name.size() <= extension.size() || entry.name.compare(entry.name.size() - extension.size(),extension.size(),extension)) continue;
+            std::string path = path_join(directory,entry.name);
+            if (path_kind(path) != PIX_PATH_FILE) continue;
+            PixUIMenuItem* item = themes->add(entry.name.substr(0,entry.name.size() - extension.size()),[this,path]() { switch_theme(path); });
+            item->checkable = true;
+            item->checked_state = [this,path]() { return !theme_path.empty() && path_join(user_directory,theme_path) == path; };
+        }
+    }
     PixUIMenu* format = preferences->child(*preferences->add("File format"));
     PixUIMenuItem* jpg = format->add(PIXELINA_JPG,[this]() { action(CMD_JPG); });
     jpg->checkable = true;
@@ -924,16 +1260,53 @@ void Pixelina::build_menus()
     fullscreen->checked_state = [this]() { return main_form.fullscreen; };
     popups[2]->add("Bookmark",[this]() { action(CMD_BOOKMARK); })->bind_shortcut(PIXUI_F2,0,"F2");
     popups[2]->add("Unbookmark",[this]() { action(CMD_UNBOOKMARK); })->bind_shortcut(PIXUI_F2,PIXUI_SHIFT,"Shift+F2");
+    popups[2]->add("Queue",[this]() { queue_view(); })->bind_shortcut(PIXUI_F6,0,"F6");
     scaled->bind_shortcut(PIXUI_F3,0,"F3");
     scaled->checkable = true;
     scaled->checked_state = [this]() { return main_form.image->scaled; };
     PixUIMenuItem* decode = popups[2]->add("Decode on-the-go",[this]() { action(CMD_DECODE); });
     decode->checkable = true;
     decode->checked_state = [this]() { return decode_on_the_go.load(); };
+    decode->enabled_state = [this]() { return queue.active == UI_QUEUE_NO_TASK; };
     PixUIMenuItem* chat = popups[2]->add("Chat",[this]() { action(CMD_CHAT); });
     chat->enabled_state = [this]() { return !busy && image_valid(image); };
     popups[3]->add(PIXELINA_ABOUT_PREFIX PIXELINA_NAME,[this]() { action(CMD_ABOUT); });
     main_form.add_system_menu();
+}
+
+static void refresh_theme_controls(PixUIForm &form)
+{
+    // Only the persistent workspace is refreshed; its modal dialogs block theme selection.
+    for (const auto &child : form.children()) {
+        if (PixUILabel* label = dynamic_cast<PixUILabel*>(child.get())) label->color = pixui_theme.fonts[label->font_role].color;
+        if (PixUIPanel* panel = dynamic_cast<PixUIPanel*>(child.get())) panel->color = UI_COLOR_FACE;
+        if (PixUIGroupBox* group = dynamic_cast<PixUIGroupBox*>(child.get())) {
+            group->color = UI_COLOR_LIGHT;
+            group->wheel_step = UI_LINE_HEIGHT;
+            if (dynamic_cast<PixTab*>(group)) group->inset_top = UI_TAB_HEIGHT + UI_BORDER_WIDTH;
+            else if (!dynamic_cast<PixTabGroup*>(group)) group->inset_top = UI_FONT_HEIGHT + UI_TITLE_PADDING;
+        }
+        if (PixUIForm* nested = dynamic_cast<PixUIForm*>(child.get())) refresh_theme_controls(*nested);
+    }
+    form.repaint = true;
+}
+
+void Pixelina::switch_theme(const std::string &path)
+{
+    menus->dismiss();
+    std::string error;
+    if (!pixui_load_theme(path,error)) {
+        message(error);
+        return;
+    }
+    theme_path = path;
+    refresh_theme_controls(main_form);
+    main_form.menu_background->color = UI_COLOR_LIGHT;
+    main_form.layout_settings();
+    for (size_t i = 0; i < menus->items.size(); i++) {
+        menus->items[i]->bounds = i < UI_TOP_MENU_COUNT? PixUIRect{int(i) * UI_TOP_MENU_WIDTH,UI_FRAME + UI_WINDOW_TITLE_HEIGHT,UI_TOP_MENU_WIDTH,UI_MENU_HEIGHT} : PixUIRect{UI_FRAME,UI_FRAME,UI_WINDOW_TITLE_HEIGHT,UI_WINDOW_TITLE_HEIGHT};
+    }
+    layout();
 }
 
 void Pixelina::build_gui()
@@ -1005,7 +1378,6 @@ void Pixelina::event(const SDL_Event &native)
     }
     PixUIEvent input = canvas.translate(native);
     canvas.event(main_form,input);
-    SDL_CaptureMouse(canvas.captured? SDL_TRUE : SDL_FALSE);
     layout();
 }
 
@@ -1029,9 +1401,11 @@ void Pixelina::window_event(const SDL_Event &input)
         break;
     case SDL_WINDOWEVENT_FOCUS_LOST:
         canvas.release_capture();
-        SDL_CaptureMouse(SDL_FALSE);
         main_form.repaint = true;
         main_form.active = false;
+        break;
+    case SDL_WINDOWEVENT_LEAVE:
+        canvas.release_capture();
         break;
     case SDL_WINDOWEVENT_SIZE_CHANGED:
         main_form.repaint = true;
@@ -1051,8 +1425,8 @@ void Pixelina::window_event(const SDL_Event &input)
 
 void Pixelina::generation_image(PixImage completed)
 {
-    SDL_Texture* texture = SDL_CreateTexture(renderer,SDL_PIXELFORMAT_RGB24,SDL_TEXTUREACCESS_STATIC,completed.width,completed.height);
-    bool uploaded = texture && !SDL_UpdateTexture(texture,nullptr,completed.rgb.data(),completed.width * 3);
+    SDL_Texture* texture = canvas.create_texture(completed);
+    bool uploaded = texture != nullptr;
     image = std::move(completed);
     image_record = job.parameters;
     image_has_record = true;
@@ -1075,11 +1449,15 @@ int Pixelina::run()
     uint64_t timing_second = 0;
     while (running) {
         SDL_Event input;
+        // Wake immediately for drag input without spinning while the pointer is still.
+        if (canvas.captured == &main_form && SDL_WaitEventTimeout(&input,UI_FRAME_DELAY)) event(input);
         while (SDL_PollEvent(&input)) event(input);
+        canvas.flush_window_commands();
         if (busy) {
             SDL_LockMutex(mutex);
             bool done = worker_done;
-            std::string stage = stop_requested? UI_STOPPING_TEXT : worker_stage;
+            bool pause_after = pause_requested;
+            std::string stage = stop_requested? UI_STOPPING_TEXT : (worker_paused? UI_QUEUE_PAUSED_TEXT : (pause_requested? UI_QUEUE_PAUSING_TEXT : worker_stage));
             uint64_t second = canvas.ticks() / 1000;
             bool changed = generation_progress != worker_progress || status != stage || second != timing_second;
             generation_progress = worker_progress;
@@ -1092,6 +1470,16 @@ int Pixelina::run()
                 completed = std::move(worker_image);
                 generation_seconds = worker_seconds;
             }
+            if (queue.active != UI_QUEUE_NO_TASK && (changed || done)) {
+                PixQueueItem &item = queue.items[queue.active];
+                item.progress = std::min(worker_progress,nextafterf(1,0));
+                double paused = worker_pause_seconds;
+                if (worker_paused) paused += double(SDL_GetPerformanceCounter() - worker_pause_started) / SDL_GetPerformanceFrequency();
+                item.seconds = done? worker_seconds : std::max(0.0,double(canvas.ticks() - generation_started) / 1000 - paused);
+                queue.paused = worker_paused;
+                queue.pausing = pause_requested && !worker_paused;
+                queue.revision++;
+            }
             SDL_UnlockMutex(mutex);
             if (!preview.rgb.empty()) {
                 generation_image(std::move(preview));
@@ -1101,6 +1489,7 @@ int Pixelina::run()
                 SDL_WaitThread(worker,nullptr);
                 worker = nullptr;
                 busy = false;
+                bool queued = queue.active != UI_QUEUE_NO_TASK;
                 if (stop_requested || !error.empty()) {
                     status = stop_requested? UI_STOPPED_TEXT : "Generation failed";
                     if (!stop_requested) message(error);
@@ -1108,11 +1497,46 @@ int Pixelina::run()
                     generation_image(std::move(completed));
                     status = "Generated image (unsaved)";
                 }
+                if (queued) {
+                    PixQueueItem &item = queue.items[queue.active];
+                    queue.elapsed += generation_seconds;
+                    bool saved = !stop_requested && error.empty() && save_image();
+                    if (saved) {
+                        item.state = PIX_QUEUE_COMPLETE;
+                        item.progress = 1;
+                        item.output = image_thumbnail(image);
+                        item.filename = image_source_path;
+                        job = PixJob();
+                    } else {
+                        item.job = std::move(job);
+                        item.state = stop_requested? PIX_QUEUE_PENDING : PIX_QUEUE_FAILED;
+                        item.error = stop_requested? std::string{} : (error.empty()? dialog_message : error);
+                        if (stop_requested) item.progress = 0;
+                        queue.running = false;
+                    }
+                    queue.active = UI_QUEUE_NO_TASK;
+                    queue.pausing = false;
+                    queue.paused = queue.running && pause_after;
+                    if (queue.paused) status = UI_QUEUE_PAUSED_TEXT;
+                    queue.revision++;
+                    if (queue_clear_requested) {
+                        queue.items.clear();
+                        queue.elapsed = 0;
+                        queue.reset_revision++;
+                        queue_clear_requested = false;
+                        status = UI_QUEUE_CLEARED_TEXT;
+                    }
+                    if (!queue_import_path.empty()) {
+                        std::string path = std::move(queue_import_path);
+                        queue_import(main_form,path);
+                    }
+                    queue_next();
+                }
             }
             if (changed || done) layout();
         }
         if (main_form.needs_repaint()) paint();
-        SDL_Delay(UI_FRAME_DELAY);
+        if (canvas.captured != &main_form) SDL_Delay(UI_FRAME_DELAY);
     }
     return 0;
 }
@@ -1141,39 +1565,37 @@ void PixelinaForm::create_controls()
     prompt = prompt_group->add<PixUIMemo>();
     prompt_group->place(*prompt,{0,0,0,0},PIXUI_STRETCH_X | PIXUI_STRETCH_Y);
     register_focus(*prompt);
-    tabs->footer_height = UI_SETTINGS_FOOTER;
     for (size_t page = 0; page < UI_SETTINGS_PAGES; page++) {
         PixTabGroup* settings = tabs->add_group(page == UI_GENERATE_PAGE? UI_GENERATE_TEXT : "Edit");
         pages[page] = settings;
         size_t count = page == UI_GENERATE_PAGE? UI_SETTINGS_COUNT : UI_EDIT_SETTINGS_COUNT;
-        settings->content_height = int(count) * UI_SETTINGS_ROW + UI_MARGIN;
-        settings->content_width = UI_SETTINGS_MIN_WIDTH;
-        settings->wheel_step = UI_SETTINGS_ROW;
         for (size_t i = 0; i < count; i++) {
             PixUILabel* label = settings->add<PixUILabel>(page == UI_GENERATE_PAGE? field_labels[i] : edit_field_labels[i]);
-            settings->place(*label,{UI_MARGIN - UI_BORDER_WIDTH,int(i) * UI_SETTINGS_ROW + UI_TEXT_PADDING,-(UI_MARGIN - UI_BORDER_WIDTH) * 2,UI_FONT_HEIGHT},PIXUI_STRETCH_X);
+            settings_labels[page].push_back(label);
             PixUIEdit* field = settings->add<PixUIEdit>();
             if (page == UI_GENERATE_PAGE) fields[i] = field;
             else edit_fields[i] = field;
             register_focus(*field);
             bool dimension = i == UI_WIDTH_FIELD || i == UI_HEIGHT_FIELD || (page == UI_EDIT_PAGE && i == UI_EDIT_RESOLUTION);
-            int button_width = dimension? UI_SPIN_BUTTON_WIDTH : (i == UI_SEED_FIELD || i >= UI_MODEL_FIRST? UI_BROWSE_BUTTON_WIDTH : 0);
-            settings->place(*field,{UI_MARGIN - UI_BORDER_WIDTH,int(i) * UI_SETTINGS_ROW + UI_FIELD_INPUT_Y,-(UI_MARGIN - UI_BORDER_WIDTH) * 2 - button_width,UI_FIELD_HEIGHT},PIXUI_STRETCH_X | PIXUI_FULLY_VISIBLE);
+            bool spin = dimension || i == UI_STEPS_FIELD;
+            int button_width = spin? UI_SPIN_BUTTON_WIDTH : (i == UI_SEED_FIELD || i >= UI_MODEL_FIRST? UI_BROWSE_BUTTON_WIDTH : 0);
             if (!button_width) continue;
-            if (dimension) {
+            if (spin) {
                 for (int direction : {1,-1}) {
                     PixUIButton* button = settings->add<PixUIButton>(direction > 0? UI_CONTROL_UP : UI_CONTROL_DOWN);
-                    dimension_buttons.push_back(button);
-                    int step = page == UI_GENERATE_PAGE? PIXELINA_IMAGE_MULTIPLE : QWEN_IMAGE_MULTIPLE;
-                    button->activate = [this,field,direction,step]() {
+                    spin_buttons.push_back(button);
+                    int step = dimension? (page == UI_GENERATE_PAGE? PIXELINA_IMAGE_MULTIPLE : QWEN_IMAGE_MULTIPLE) : 1;
+                    int minimum = dimension? step : (page == UI_EDIT_PAGE? UI_EDIT_MIN_STEPS : 1);
+                    int maximum = !dimension && page == UI_EDIT_PAGE? PIXELINA_EDIT_MAX_STEPS : INT32_MAX;
+                    button->activate = [this,field,direction,step,minimum,maximum]() {
                         if (!field->enabled) return;
                         uint64_t value;
-                        if (!parse_unsigned(field->model.text,value) || value > INT32_MAX) return;
+                        if (field->model.text.empty() || !parse_unsigned(field->model.text,value) || value < uint64_t(minimum) || value > uint64_t(maximum)) return;
                         if (direction > 0) {
-                            if (value > uint64_t(INT32_MAX - step)) return;
+                            if (value > uint64_t(maximum - step)) return;
                             value += step;
                         } else {
-                            if (value < uint64_t(step * 2)) return;
+                            if (value < uint64_t(minimum + step)) return;
                             value -= step;
                         }
                         field->set_text(std::to_string(value));
@@ -1181,8 +1603,6 @@ void PixelinaForm::create_controls()
                     };
                     if (direction > 0) field->increment = button->activate;
                     else field->decrement = button->activate;
-                    int y = int(i) * UI_SETTINGS_ROW + UI_FIELD_INPUT_Y + (direction > 0? 0 : UI_FIELD_HEIGHT / 2);
-                    settings->place(*button,{-(UI_MARGIN - UI_BORDER_WIDTH) - button_width,y,button_width,UI_FIELD_HEIGHT / 2},PIXUI_ALIGN_RIGHT | PIXUI_FULLY_VISIBLE);
                 }
                 continue;
             }
@@ -1190,13 +1610,10 @@ void PixelinaForm::create_controls()
             if (i == UI_SEED_FIELD) random_seed[page] = button;
             else if (page == UI_GENERATE_PAGE) browse[i] = button;
             else edit_browse[i] = button;
-            settings->place(*button,{-(UI_MARGIN - UI_BORDER_WIDTH) - button_width,int(i) * UI_SETTINGS_ROW + UI_FIELD_INPUT_Y,button_width,UI_FIELD_HEIGHT},PIXUI_ALIGN_RIGHT | PIXUI_FULLY_VISIBLE);
         }
     }
     preferences = tabs->add<PixUILabel>();
-    tabs->place(*preferences,{UI_MARGIN - UI_BORDER_WIDTH,-UI_SETTINGS_FOOTER + UI_TEXT_PADDING,-(UI_MARGIN - UI_BORDER_WIDTH) * 2,UI_FONT_HEIGHT},PIXUI_STRETCH_X | PIXUI_ALIGN_BOTTOM);
     generate = tabs->add<PixUIButton>();
-    tabs->place(*generate,{UI_MARGIN - UI_BORDER_WIDTH,-UI_FIELD_HEIGHT - UI_MARGIN,-(UI_MARGIN - UI_BORDER_WIDTH) * 2,UI_FIELD_HEIGHT},PIXUI_STRETCH_X | PIXUI_ALIGN_BOTTOM);
     tab_changed = [this](PixUIMemo* memo) {
         for (PixTabGroup* page : pages) {
             if (memo->parent == page) page->reveal(*memo);
@@ -1241,6 +1658,7 @@ void PixelinaForm::create_controls()
     }
     image = add<PixUIImageView>();
     image->placeholder = "Generate or select an image";
+    layout_settings();
 }
 
 void PixelinaForm::layout()
@@ -1255,7 +1673,7 @@ void PixelinaForm::layout()
     groups[UI_CAROUSEL_GROUP]->bounds = {left + UI_SPLITTER_WIDTH,UI_WORK_TOP,bounds.w - left - UI_SPLITTER_WIDTH - UI_FRAME,top_right};
     groups[UI_IMAGE_GROUP]->bounds = {groups[UI_CAROUSEL_GROUP]->bounds.x,UI_WORK_TOP + top_right + UI_SPLITTER_WIDTH,groups[UI_CAROUSEL_GROUP]->bounds.w,workspace - top_right - UI_SPLITTER_WIDTH};
     menu_background->bounds = {UI_FRAME,UI_FRAME + UI_WINDOW_TITLE_HEIGHT,bounds.w - UI_FRAME * 2,UI_MENU_HEIGHT};
-    status->bounds = {0,bounds.h - UI_STATUS_HEIGHT,bounds.w,UI_STATUS_HEIGHT};
+    status->bounds = {0,bounds.h - UI_STATUS_HEIGHT,bounds.w - (canvas.maximized()? 0 : UI_WINDOW_RESIZE_SIZE),UI_STATUS_HEIGHT};
     splitters[UI_SPLIT_LEFT]->bounds = {groups[UI_PROMPT_GROUP]->bounds.x + groups[UI_PROMPT_GROUP]->bounds.w,UI_WORK_TOP,UI_SPLITTER_WIDTH,bounds.h - UI_WORK_TOP - UI_STATUS_HEIGHT - UI_FRAME};
     splitters[UI_SPLIT_PROMPT]->bounds = {groups[UI_PROMPT_GROUP]->bounds.x,groups[UI_PROMPT_GROUP]->bounds.y + groups[UI_PROMPT_GROUP]->bounds.h,groups[UI_PROMPT_GROUP]->bounds.w,UI_SPLITTER_WIDTH};
     splitters[UI_SPLIT_CAROUSEL]->bounds = {groups[UI_CAROUSEL_GROUP]->bounds.x,groups[UI_CAROUSEL_GROUP]->bounds.y + groups[UI_CAROUSEL_GROUP]->bounds.h,groups[UI_CAROUSEL_GROUP]->bounds.w,UI_SPLITTER_WIDTH};
@@ -1270,4 +1688,37 @@ void PixelinaForm::draw()
     PixUIForm::draw();
     // Menus paint above ordinary children; cover them with the expanded image.
     if (fullscreen && !modal()) image->draw();
+}
+
+void PixelinaForm::layout_settings()
+{
+    tabs->footer_height = UI_SETTINGS_FOOTER;
+    size_t spin = 0;
+    for (size_t page = 0; page < UI_SETTINGS_PAGES; page++) {
+        PixTabGroup* settings = pages[page];
+        size_t count = page == UI_GENERATE_PAGE? UI_SETTINGS_COUNT : UI_EDIT_SETTINGS_COUNT;
+        settings->content_height = int(count) * UI_SETTINGS_ROW + UI_MARGIN;
+        settings->content_width = UI_SETTINGS_MIN_WIDTH;
+        settings->wheel_step = UI_SETTINGS_ROW;
+        for (size_t i = 0; i < count; i++) {
+            PixUIEdit* field = page == UI_GENERATE_PAGE? fields[i] : edit_fields[i];
+            bool dimension = i == UI_WIDTH_FIELD || i == UI_HEIGHT_FIELD || (page == UI_EDIT_PAGE && i == UI_EDIT_RESOLUTION);
+            bool has_spin = dimension || i == UI_STEPS_FIELD;
+            int button_width = has_spin? UI_SPIN_BUTTON_WIDTH : (i == UI_SEED_FIELD || i >= UI_MODEL_FIRST? UI_BROWSE_BUTTON_WIDTH : 0);
+            settings->place(*settings_labels[page][i],{UI_MARGIN - UI_BORDER_WIDTH,int(i) * UI_SETTINGS_ROW + UI_TEXT_PADDING,-(UI_MARGIN - UI_BORDER_WIDTH) * 2,UI_FONT_HEIGHT},PIXUI_STRETCH_X);
+            settings->place(*field,{UI_MARGIN - UI_BORDER_WIDTH,int(i) * UI_SETTINGS_ROW + UI_FIELD_INPUT_Y,-(UI_MARGIN - UI_BORDER_WIDTH) * 2 - button_width,UI_FIELD_HEIGHT},PIXUI_STRETCH_X | PIXUI_FULLY_VISIBLE);
+            if (!button_width) continue;
+            if (has_spin) {
+                for (int direction : {1,-1}) {
+                    int y = int(i) * UI_SETTINGS_ROW + UI_FIELD_INPUT_Y + (direction > 0? 0 : UI_FIELD_HEIGHT / 2);
+                    settings->place(*spin_buttons[spin++],{-(UI_MARGIN - UI_BORDER_WIDTH) - button_width,y,button_width,UI_FIELD_HEIGHT / 2},PIXUI_ALIGN_RIGHT | PIXUI_FULLY_VISIBLE);
+                }
+            } else {
+                PixUIButton* button = i == UI_SEED_FIELD? random_seed[page] : (page == UI_GENERATE_PAGE? browse[i] : edit_browse[i]);
+                settings->place(*button,{-(UI_MARGIN - UI_BORDER_WIDTH) - button_width,int(i) * UI_SETTINGS_ROW + UI_FIELD_INPUT_Y,button_width,UI_FIELD_HEIGHT},PIXUI_ALIGN_RIGHT | PIXUI_FULLY_VISIBLE);
+            }
+        }
+    }
+    tabs->place(*preferences,{UI_MARGIN - UI_BORDER_WIDTH,-UI_SETTINGS_FOOTER + UI_TEXT_PADDING,-(UI_MARGIN - UI_BORDER_WIDTH) * 2,UI_FONT_HEIGHT},PIXUI_STRETCH_X | PIXUI_ALIGN_BOTTOM);
+    tabs->place(*generate,{UI_MARGIN - UI_BORDER_WIDTH,-UI_FIELD_HEIGHT - UI_MARGIN,-(UI_MARGIN - UI_BORDER_WIDTH) * 2,UI_FIELD_HEIGHT},PIXUI_STRETCH_X | PIXUI_ALIGN_BOTTOM);
 }

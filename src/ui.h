@@ -11,19 +11,19 @@
 #include "storage.h"
 #include "pixuilib.h"
 #include "inference.h"
+#include "ui_queue.h"
 #include <array>
 #include <atomic>
 
-#define PIXELINA_VERSION "0.4"
+#define PIXELINA_VERSION "0.5"
 
 #define UI_CAPTION_SEPARATOR " - "
 #define UI_IMAGE_TITLE "Image"
 #define UI_STATUS_BUFFER 64
-#define UI_IMAGE_EXTENSIONS {".jpg",".jpeg",".jpe",".png",".bmp",".tga",".psd",".gif",".hdr",".pic",".pnm",".ppm",".pgm"}
+#define UI_IMAGE_EXTENSIONS {".jpg",".jpeg",".jpe",".png",".webp",".bmp",".tga",".psd",".gif",".hdr",".pic",".pnm",".ppm",".pgm"}
 #define UI_LEFT_FRACTION 0.32f
 #define UI_PROMPT_FRACTION 0.30f
 #define UI_CAROUSEL_FRACTION 0.24f
-#define UI_STATUS_HEIGHT (UI_LINE_HEIGHT + UI_TEXT_PADDING * 2 + UI_BORDER_WIDTH)
 #define UI_SPLITTER_WIDTH 6
 #define UI_PANEL_MIN 140
 #define UI_WORK_TOP (UI_FRAME + UI_WINDOW_TITLE_HEIGHT + UI_MENU_HEIGHT)
@@ -35,6 +35,8 @@
 #define UI_SETTINGS_PAGES 2
 #define UI_SETTINGS_FOOTER (UI_FIELD_HEIGHT * 2 + UI_MARGIN)
 #define UI_CONFIG_THEME "theme"
+#define UI_THEME_DIRECTORY "/usr/share/pixelina"
+#define UI_THEME_EXTENSION ".pixtheme"
 #define UI_CONFIG_BACKEND "backend"
 #define UI_CONFIG_FORMAT "format"
 #define UI_CONFIG_AUTO_SEED "auto_seed"
@@ -61,11 +63,14 @@
 #define UI_INVALID_NUMBERS "Seed, dimensions, steps and shift must be valid numbers."
 #define UI_STOPPED_TEXT "Generation stopped"
 #define UI_READY_TEXT "Ready"
+#define UI_OVERWRITE_TEXT "Overwrite"
+#define UI_OVERWRITE_FILE_TEXT "Overwrite existing file?\n"
 #define UI_SPIN_BUTTON_WIDTH UI_SCROLLBAR
+#define UI_EDIT_MIN_STEPS 2
 
 enum PixelinaCommand {
     CMD_OPEN = 1,CMD_SAVE,CMD_SAVE_AS,CMD_QUIT,CMD_GENERATE,CMD_SCALED,CMD_ABOUT,
-    CMD_JPG,CMD_PNG,CMD_CPU,CMD_VULKAN,CMD_DECODE,CMD_OPEN_IMAGE,CMD_CLEAR,CMD_AUTO_SEED,CMD_GLOBAL_DB,CMD_MULTI_REFERENCE,CMD_CHAT,CMD_BOOKMARK,CMD_UNBOOKMARK,CMD_FULLSCREEN
+    CMD_JPG,CMD_PNG,CMD_CPU,CMD_VULKAN,CMD_DECODE,CMD_OPEN_IMAGE,CMD_CLEAR,CMD_AUTO_SEED,CMD_GLOBAL_DB,CMD_MULTI_REFERENCE,CMD_CHAT,CMD_BOOKMARK,CMD_UNBOOKMARK,CMD_FULLSCREEN,CMD_RELOAD_DIR
 };
 
 enum PixelinaGroup {
@@ -92,13 +97,6 @@ enum PixelinaImagePage {
 enum PixelinaEditField {
     UI_EDIT_SEED,UI_EDIT_WIDTH,UI_EDIT_HEIGHT,UI_EDIT_STEPS,UI_EDIT_RESOLUTION,
     UI_EDIT_DIFFUSER,UI_EDIT_ENCODER,UI_EDIT_VISION,UI_EDIT_VAE
-};
-
-struct PixJob {
-    PixRecord parameters; // unresolved immutable result metadata
-    PixSettings generate_settings; // resolved Generate execution settings
-    PixEditSettings edit_settings; // resolved Edit execution settings
-    std::vector<PixImage> references; // owned complete reference planes
 };
 
 using PixJobInference = std::function<PixImage(const PixJob&,const InferenceProgress&,int&)>;
@@ -128,7 +126,7 @@ public:
     std::array<PixUIEdit*,UI_EDIT_SETTINGS_COUNT> edit_fields; // owned Edit editors
     std::array<PixUIButton*,UI_EDIT_SETTINGS_COUNT> edit_browse = {}; // Edit model selection actions
     std::array<PixUIButton*,UI_SETTINGS_PAGES> random_seed = {}; // seed randomization actions
-    std::vector<PixUIButton*> dimension_buttons; // dimension increment and decrement actions
+    std::vector<PixUIButton*> spin_buttons; // dimension and step increment and decrement actions
     float left_fraction = UI_LEFT_FRACTION,prompt_fraction = UI_PROMPT_FRACTION,carousel_fraction = UI_CAROUSEL_FRACTION; // persistent pane ratios
 
 private:
@@ -137,6 +135,9 @@ private:
     PixUIPanel* menu_background; // full-width menu background
     std::array<PixUIGroupBox*,UI_GROUP_COUNT> groups; // workspace containers
     std::array<PixUISplitter*,UI_SPLITTER_COUNT> splitters; // owned pane dividers
+    std::array<std::vector<PixUILabel*>,UI_SETTINGS_PAGES> settings_labels; // settings captions retained for font-dependent placement
+
+    void layout_settings();
 };
 
 class Pixelina
@@ -144,7 +145,7 @@ class Pixelina
 public:
     Pixelina() = default;
     ~Pixelina();
-    bool initialize(const std::string &directory, bool png, std::string &error, bool default_directory = false, bool use_saved_directory = false);
+    bool initialize(const std::string &directory, bool png, std::string &error, bool default_directory = false, bool use_saved_directory = false, const std::string &job_file = {});
     int run();
 
 private:
@@ -156,7 +157,12 @@ private:
     SDL_Texture* current = nullptr; // current full-resolution image texture
     SDL_Thread* worker = nullptr; // image generation worker
     SDL_mutex* mutex = nullptr; // worker-result synchronization
+    SDL_cond* pause_condition = nullptr; // releases a worker suspended at a progress boundary
     std::atomic<bool> stop_requested{false}; // cooperative worker cancellation
+    bool pause_requested = false; // suspension request protected by mutex
+    bool worker_paused = false; // boundary suspension acknowledged under mutex
+    double worker_pause_seconds = 0; // completed pauses excluded from active job time
+    uint64_t worker_pause_started = 0; // performance counter at the current pause boundary
     std::atomic<bool> decode_on_the_go{false}; // live preview switch read at each diffusion step
     bool worker_done = false; // worker result ready under mutex
     std::string worker_message; // worker error; empty on success
@@ -169,6 +175,9 @@ private:
     double generation_seconds = 0; // last complete generation duration
     uint64_t generation_started = 0; // UI clock at the start of the current job
     PixJob job; // frozen settings, prompt and references read by the worker
+    PixQueue queue; // sequential batch state shared only by UI controls
+    bool queue_clear_requested = false; // discard queue rows once the cancelled worker finishes
+    std::string queue_import_path; // job file to load after the active queued worker stops
     PixRecord image_record; // frozen generation metadata of the displayed image
     bool image_has_record = false; // current picture has generation metadata
     std::string image_source_path; // absolute current picture provenance, empty for temporary results
@@ -200,7 +209,7 @@ private:
     void event(const SDL_Event &event);
     void window_event(const SDL_Event &input);
     void action(int command);
-    void message(const std::string &text);
+    void message(const std::string &text, PixUIForm* owner = nullptr);
     bool read_settings();
     void write_settings();
     bool read_edit_settings();
@@ -213,14 +222,25 @@ private:
     bool open_directory(const std::string &directory);
     bool select_image(size_t index);
     void bookmark_image(bool remove);
-    void save_image();
+    bool save_image();
     void export_image(const std::string &destination);
     void generation_image(PixImage completed);
     void build_gui();
     void build_menus();
+    void switch_theme(const std::string &path);
     void restore_configuration(const std::map<std::string,std::string> &values);
     void save_configuration();
     void switch_database();
+    bool start_generation();
+    void queue_add();
+    void queue_view();
+    bool queue_import(PixUIForm &owner, const std::string &path = {});
+    void queue_export(PixUIForm &owner);
+    void queue_start(PixUIForm &owner);
+    void queue_pause(PixUIForm &owner);
+    void queue_stop(PixUIForm &owner);
+    void queue_clear();
+    void queue_next();
     PixUIThumbCache load_thumbnail(const std::string &path);
     static int generation_worker(void* context);
 };

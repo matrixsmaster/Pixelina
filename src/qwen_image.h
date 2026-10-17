@@ -10,14 +10,7 @@
 #include "qwen_vl.h"
 #include "qwen_vae.h"
 
-#define QWEN_IMAGE_TEXT_NORM "txt_in.text_norm.weight"
-#define QWEN_IMAGE_BLOCK_PREFIX "transformer_blocks."
-#define QWEN_IMAGE_QUERY_NORM "attn.norm_q.weight"
-#define QWEN_IMAGE_KEY_NORM "attn.norm_k.weight"
-#define QWEN_IMAGE_FFN_FUSED_WEIGHT "img_mlp.gate_up.weight"
 #define QWEN_IMAGE_CONTAINER_ERROR "Cannot read the selected Qwen Image component containers."
-#define QWEN_IMAGE_INPUT_PROJECTION "img_in"
-#define QWEN_IMAGE_FFN_FUSED "img_mlp.gate_up"
 
 #define QWEN_IMAGE_HIDDEN 4096
 #define QWEN_IMAGE_MLP 12288

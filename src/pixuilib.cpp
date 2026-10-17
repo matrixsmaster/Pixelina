@@ -6,8 +6,8 @@
  */
 #include <algorithm>
 #include <ctype.h>
-#include <cstdio>
-#include <cstdlib>
+#include <stdio.h>
+#include <stdlib.h>
 #include <fstream>
 #include "pixuilib.h"
 #include "os.h"
@@ -28,7 +28,7 @@ static std::string theme_trim(const std::string &value)
 static bool theme_color(const std::string &text, unsigned &color)
 {
     unsigned red,green,blue;
-    if (std::sscanf(text.c_str(),"%u ,%u ,%u",&red,&green,&blue) != 3) return false;
+    if (sscanf(text.c_str(),"%u ,%u ,%u",&red,&green,&blue) != 3) return false;
     color = (uint32_t(uint8_t(red)) << (UI_COLOR_CHANNEL_BITS * 2)) | (uint32_t(uint8_t(green)) << UI_COLOR_CHANNEL_BITS) | uint8_t(blue);
     return true;
 }
@@ -40,7 +40,7 @@ static bool theme_font(std::map<std::string,std::string> &values, const std::str
     for (size_t i = 0; i < sizeof(suffixes) / sizeof(suffixes[0]); i++) {
         auto entry = values.find(name + suffixes[i]);
         if (entry == values.end()) return false;
-        dimensions[i] = std::atoi(entry->second.c_str());
+        dimensions[i] = atoi(entry->second.c_str());
         values.erase(entry);
     }
     if (dimensions[0] < 1 || dimensions[0] > UI_FONT_MAX_WIDTH || dimensions[1] < 1 || dimensions[1] > UI_FONT_MAX_HEIGHT || dimensions[2] < 0 || dimensions[3] >= UI_FONT_GLYPHS || dimensions[2] > dimensions[3]) return false;
@@ -53,7 +53,7 @@ static bool theme_font(std::map<std::string,std::string> &values, const std::str
         const char* next = entry->second.c_str();
         for (int row = 0; row < font.height; row++) {
             char* end;
-            font.rows[size_t(ch) * font.height + row] = std::strtoul(next,&end,0);
+            font.rows[size_t(ch) * font.height + row] = strtoul(next,&end,0);
             next = *end == ','? end + 1 : end;
         }
         values.erase(entry);
@@ -85,7 +85,7 @@ static bool theme_style(std::map<std::string,std::string> &values, const std::ma
     font.height = source_height;
     entry = values.find(key + UI_THEME_SIZE_SUFFIX);
     if (entry != values.end()) {
-        font.height = std::atoi(entry->second.c_str());
+        font.height = atoi(entry->second.c_str());
         if (font.height < 1 || font.height > UI_FONT_MAX_HEIGHT) return false;
         font.width = std::max(1,(source_width * font.height + source_height / 2) / source_height);
         if (font.width > UI_FONT_MAX_SCALED_WIDTH) return false;
@@ -252,8 +252,10 @@ void PixUICanvas::text(int x, int y, const std::string &value, unsigned color, P
     }
 }
 
-void PixUICanvas::button(const PixUIRect &rect, const std::string &label, bool pressed)
+void PixUICanvas::button(const PixUIRect &rect, const std::string &label, bool pressed, bool enabled)
 {
+    pressed = pressed && enabled;
+    unsigned ink = enabled? pixui_theme.fonts[PIXUI_FONT_LABEL].color : UI_COLOR_DISABLED;
     fill(rect,UI_COLOR_DARK);
     PixUIRect inner = {rect.x + 1,rect.y + 1,rect.w - 2,rect.h - 2};
     bevel(inner,pressed);
@@ -271,14 +273,14 @@ void PixUICanvas::button(const PixUIRect &rect, const std::string &label, bool p
         }
         for (int row = 0; row < UI_ARROW_SIZE; row++) {
             int radius = label == UI_CONTROL_UP || label == UI_CONTROL_LEFT? row : UI_ARROW_SIZE - row - 1;
-            if (horizontal) fill({top + row,center - radius,1,radius * 2 + 1},UI_COLOR_DARK);
-            else fill({center - radius,top + row,radius * 2 + 1,1},UI_COLOR_DARK);
+            if (horizontal) fill({top + row,center - radius,1,radius * 2 + 1},ink);
+            else fill({center - radius,top + row,radius * 2 + 1,1},ink);
         }
     } else if (label == UI_CONTROL_SYSTEM) {
         PixUIRect dash = {rect.x + UI_ARROW_SIZE,rect.y + rect.h / 2 - 1,rect.w - UI_ARROW_SIZE * 2,UI_SYSTEM_BAR_HEIGHT};
-        fill(dash,UI_COLOR_DARK);
+        fill(dash,ink);
         fill({dash.x + 1,dash.y + 1,dash.w - 2,1},UI_COLOR_LIGHT);
-    } else text(rect.x + std::max(UI_TEXT_PADDING,(rect.w - int(label.size()) * UI_FONT_WIDTH) / 2),rect.y + (rect.h - UI_FONT_HEIGHT) / 2,label,pixui_theme.fonts[PIXUI_FONT_LABEL].color);
+    } else text(rect.x + std::max(UI_TEXT_PADDING,(rect.w - int(label.size()) * UI_FONT_WIDTH) / 2),rect.y + (rect.h - UI_FONT_HEIGHT) / 2,label,ink);
 }
 
 void PixUICanvas::pointer_position(int &x, int &y) const
@@ -453,7 +455,7 @@ void PixUIButton::draw()
     needs_repaint();
     repaint = false;
     if (!visible) return;
-    canvas.button(bounds,caption,pressed);
+    canvas.button(bounds,caption,pressed,interactive());
 }
 
 bool PixUIButton::event(const PixUIEvent &input)
@@ -548,9 +550,14 @@ void PixUIThumb::draw()
         height = preview.height;
     }
     PixUIRect cell = bounds;
+    PixUIRect previous,effective = cell;
+    bool clipped = canvas.clip(previous);
+    if (clipped && !pixui_intersect(cell,previous,effective)) return;
+    canvas.set_clip(&effective);
     canvas.fill(cell,selected? UI_COLOR_SELECTED : UI_COLOR_LIGHT);
     draw_image({cell.x + UI_TEXT_PADDING,cell.y + UI_CONTENT_INSET,cell.w - UI_TEXT_PADDING * 2,cell.h - UI_LINE_HEIGHT - UI_CONTENT_INSET});
     canvas.text(cell.x + UI_CONTENT_INSET,cell.y + cell.h - UI_LINE_HEIGHT,caption,selected? UI_COLOR_LIGHT : pixui_theme.fonts[PIXUI_FONT_LABEL].color);
+    canvas.set_clip(clipped? &previous : nullptr);
 }
 
 PixUIScrollbar::PixUIScrollbar(PixUICanvas &context) : PixUIControl(context)
@@ -568,12 +575,12 @@ void PixUIScrollbar::draw()
     int thumb = std::min(track,std::max(UI_SCROLLBAR,track * page / std::max(1,std::max(page,total))));
     int offset = UI_SCROLLBAR + (track - thumb) * *position / std::max(1,total - page);
     if (vertical) {
-        canvas.button({bounds.x,bounds.y,bounds.w,UI_SCROLLBAR},UI_CONTROL_UP,false);
-        canvas.button({bounds.x,bounds.y + bounds.h - UI_SCROLLBAR,bounds.w,UI_SCROLLBAR},UI_CONTROL_DOWN,false);
+        canvas.button({bounds.x,bounds.y,bounds.w,UI_SCROLLBAR},UI_CONTROL_UP,false,interactive());
+        canvas.button({bounds.x,bounds.y + bounds.h - UI_SCROLLBAR,bounds.w,UI_SCROLLBAR},UI_CONTROL_DOWN,false,interactive());
         canvas.bevel({bounds.x,bounds.y + offset,bounds.w,thumb},false);
     } else {
-        canvas.button({bounds.x,bounds.y,UI_SCROLLBAR,bounds.h},UI_CONTROL_LEFT,false);
-        canvas.button({bounds.x + bounds.w - UI_SCROLLBAR,bounds.y,UI_SCROLLBAR,bounds.h},UI_CONTROL_RIGHT,false);
+        canvas.button({bounds.x,bounds.y,UI_SCROLLBAR,bounds.h},UI_CONTROL_LEFT,false,interactive());
+        canvas.button({bounds.x + bounds.w - UI_SCROLLBAR,bounds.y,UI_SCROLLBAR,bounds.h},UI_CONTROL_RIGHT,false,interactive());
         canvas.bevel({bounds.x + offset,bounds.y,thumb,bounds.h},false);
     }
 }
@@ -922,6 +929,7 @@ void PixUIMenuItem::activate_item()
 
 bool PixUIMenuItem::accelerator(const PixUIEvent &input)
 {
+    update();
     if (!enabled || input.type != PIXUI_KEY) return false;
     if (shortcut_key && input.key == shortcut_key && input.mod == shortcut_mod) {
         activate_item();
@@ -1254,7 +1262,7 @@ void PixUIForm::layout_window(const std::string &caption)
     title_clip->bounds = {UI_FRAME + UI_WINDOW_TITLE_HEIGHT,UI_FRAME,bounds.w - UI_FRAME * 2 - UI_WINDOW_TITLE_HEIGHT * 3,UI_WINDOW_TITLE_HEIGHT};
     title_label->bounds = title_clip->bounds;
     title_label->caption = caption;
-    title_label->color = modal_blocked || !active? UI_COLOR_DARK : pixui_theme.fonts[PIXUI_FONT_HEADER].color;
+    title_label->color = pixui_theme.fonts[modal_blocked || !active? PIXUI_FONT_LABEL : PIXUI_FONT_HEADER].color;
     system->bounds = {UI_FRAME,UI_FRAME,UI_WINDOW_TITLE_HEIGHT,UI_WINDOW_TITLE_HEIGHT};
     PixUILayout buttons = {bounds.w - UI_FRAME - UI_WINDOW_TITLE_HEIGHT * 2,UI_FRAME,0};
     minimize->bounds = buttons.row(UI_WINDOW_TITLE_HEIGHT,UI_WINDOW_TITLE_HEIGHT);
@@ -1273,7 +1281,7 @@ void PixUIForm::command(PixUIWindowCommand value)
 void PixUIForm::title_event(int x, int y, bool menu_button)
 {
     uint64_t now = canvas.ticks();
-    bool twice = click_time && now - click_time <= UI_DOUBLE_CLICK_MS && std::abs(x - click_x) < UI_SCROLLBAR && std::abs(y - click_y) < UI_SCROLLBAR;
+    bool twice = click_time && now - click_time <= UI_DOUBLE_CLICK_MS && abs(x - click_x) < UI_SCROLLBAR && abs(y - click_y) < UI_SCROLLBAR;
     click_time = twice? 0 : now;
     click_x = x;
     click_y = y;
@@ -1297,6 +1305,7 @@ PixUIHit PixUIForm::hit_test(int x, int y) const
     bool left = x < UI_FRAME,right = x >= bounds.w - UI_FRAME;
     bool top = y < UI_FRAME,bottom = y >= bounds.h - UI_FRAME;
     if (!canvas.maximized()) {
+        if (x >= bounds.w - UI_WINDOW_RESIZE_SIZE && y >= bounds.h - UI_WINDOW_RESIZE_SIZE) return PIXUI_HIT_BOTTOMRIGHT;
         if (top && left) return PIXUI_HIT_TOPLEFT;
         if (top && right) return PIXUI_HIT_TOPRIGHT;
         if (bottom && left) return PIXUI_HIT_BOTTOMLEFT;
@@ -1305,7 +1314,6 @@ PixUIHit PixUIForm::hit_test(int x, int y) const
         if (bottom) return PIXUI_HIT_BOTTOM;
         if (left) return PIXUI_HIT_LEFT;
         if (right) return PIXUI_HIT_RIGHT;
-        if (x >= bounds.w - UI_SCROLLBAR && y >= bounds.h - UI_SCROLLBAR) return PIXUI_HIT_BOTTOMRIGHT;
     }
     if (y >= UI_FRAME && y < UI_FRAME + UI_WINDOW_TITLE_HEIGHT && x >= UI_FRAME + UI_WINDOW_TITLE_HEIGHT && x < bounds.w - UI_FRAME - UI_WINDOW_TITLE_HEIGHT * 2) return PIXUI_HIT_MOVE;
     return PIXUI_HIT_NORMAL;
@@ -1471,6 +1479,18 @@ void PixUIForm::draw()
     for (const auto &element : elements) {
         element->needs_repaint();
         if (element->visible && element->layout_visible && element.get() != menu_bar) element->draw();
+    }
+    if (frame && !canvas.maximized()) {
+        PixUIRect grip = {bounds.x + bounds.w - UI_WINDOW_RESIZE_SIZE,bounds.y + bounds.h - UI_WINDOW_RESIZE_SIZE,UI_WINDOW_RESIZE_SIZE,UI_WINDOW_RESIZE_SIZE};
+        canvas.bevel(grip,false);
+        int right = grip.x + grip.w - UI_TEXT_PADDING;
+        int bottom = grip.y + grip.h - UI_TEXT_PADDING;
+        for (int length = UI_RESIZE_GRIP_SPACING; length < grip.w - UI_TEXT_PADDING * 2; length += UI_RESIZE_GRIP_SPACING) {
+            for (int pixel = 0; pixel < length; pixel++) {
+                canvas.point(right - length + pixel,bottom - pixel,UI_COLOR_SHADOW);
+                canvas.point(right - length + pixel,bottom - pixel + 1,UI_COLOR_LIGHT);
+            }
+        }
     }
     if (menu_bar) menu_bar->draw();
     canvas.set_clip(clipped? &previous : nullptr);
@@ -1939,6 +1959,36 @@ bool PixUICarousel::event(const PixUIEvent &input)
         if (auto form = dynamic_cast<PixUIForm*>(owner)) root = form;
     }
     if (input.type == PIXUI_DOWN && input.button == PIXUI_LEFT_BUTTON && pixui_inside(bounds,input.x,input.y)) root->focus_object(*this);
+    if (input.type == PIXUI_DOWN && pixui_inside(previews->bounds,input.x,input.y)) {
+        for (size_t slot = 0; slot < thumbnails.size(); slot++) {
+            if (!pixui_inside(thumbnails[slot]->bounds,input.x,input.y)) continue;
+            search_prefix.clear();
+            // Handle selection here because scrolling may replace the clicked thumbnail.
+            if (input.button == PIXUI_LEFT_BUTTON) click(first + slot);
+            return true;
+        }
+    }
+    if (input.type == PIXUI_TEXT && root->keyboard_focus == this && !(input.mod & (PIXUI_CTRL | PIXUI_ALT))) {
+        for (unsigned char ch : input.text) search_prefix += char(tolower(ch));
+        if (!count || search_prefix.empty() || (!search_name && !caption)) return true;
+        size_t start = selection < 0? 0 : size_t(selection + 1) % count;
+        for (size_t attempt = 0; attempt < count; attempt++) {
+            size_t index = (start + attempt) % count;
+            std::string name = search_name? search_name(index) : caption(index);
+            if (name.size() < search_prefix.size()) continue;
+            bool matches = true;
+            for (size_t i = 0; i < search_prefix.size(); i++) {
+                if (tolower((unsigned char)name[i]) != (unsigned char)search_prefix[i]) {
+                    matches = false;
+                    break;
+                }
+            }
+            if (!matches) continue;
+            if (!selected || selected(index)) select(int(index));
+            break;
+        }
+        return true;
+    }
     if (input.type == PIXUI_KEY && root->keyboard_focus == this && (input.key == PIXUI_LEFT || input.key == PIXUI_RIGHT)) {
         if (!count) return true;
         int next = selection < 0? 0 : std::max(0,std::min(int(count) - 1,selection + (input.key == PIXUI_LEFT? -1 : 1)));
@@ -1958,6 +2008,8 @@ void PixUICarousel::items_changed(size_t total, bool reset)
     repaint = true;
     count = total;
     invalid = true;
+    search_prefix.clear();
+    clicked_item = -1;
     if (reset) {
         offset = 0;
         selection = -1;
@@ -1998,9 +2050,6 @@ void PixUICarousel::layout()
         for (size_t index = first; index < last; index++) {
             PixUIThumb* preview = previews->add<PixUIThumb>();
             preview->source = [this,index]() -> PixUIThumbCache& { return thumbnail(index); };
-            preview->activate = [this,index]() {
-                if (!selected || selected(index)) select(int(index));
-            };
             preview->placeholder = "Missing image";
             preview->caption = caption? caption(index) : "";
             thumbnails.push_back(preview);
@@ -2017,6 +2066,17 @@ void PixUICarousel::layout()
     scrollbar->page = bounds.w + UI_BORDER_WIDTH * 2;
     scrollbar->total = int(count) * cell_width;
     scrollbar->step = cell_width;
+}
+
+void PixUICarousel::click(size_t index)
+{
+    uint64_t now = canvas.ticks();
+    bool twice = clicked_item == int(index) && now - item_click_time <= UI_DOUBLE_CLICK_MS;
+    clicked_item = twice? -1 : int(index);
+    item_click_time = now;
+    if (selected && !selected(index)) return;
+    select(int(index));
+    if (twice && double_clicked) double_clicked(index);
 }
 
 PixUIThumbCache &PixUICarousel::thumbnail(size_t index)
@@ -2055,7 +2115,7 @@ void PixUIProgress::draw()
     if (busy) {
         float complete = std::max(0.0f,std::min(1.0f,progress));
         canvas.fill({bounds.x + UI_BORDER_WIDTH,bounds.y + UI_BORDER_WIDTH,int((bounds.w - UI_BORDER_WIDTH * 2) * complete),bounds.h - UI_BORDER_WIDTH * 2},UI_COLOR_TITLE);
-        canvas.text(bounds.x + UI_LABEL_PADDING,bounds.y + UI_TEXT_PADDING,std::to_string(int(complete * UI_PERCENT_SCALE)) + "%",UI_COLOR_LIGHT);
+        canvas.text(bounds.x + UI_LABEL_PADDING,bounds.y + UI_TEXT_PADDING,std::to_string(int(complete * UI_PERCENT_SCALE)) + "%",pixui_theme.fonts[PIXUI_FONT_HEADER].color);
     } else canvas.text(bounds.x + UI_LABEL_PADDING,bounds.y + UI_TEXT_PADDING,caption,pixui_theme.fonts[PIXUI_FONT_LABEL].color);
 }
 
@@ -2084,17 +2144,18 @@ void PixUIStatusBar::layout()
 {
     int top = bounds.y + UI_BORDER_WIDTH;
     int height = std::max(0,bounds.h - UI_BORDER_WIDTH * 2);
+    int label_top = top + (height - UI_FONT_HEIGHT) / 2;
     count_clip->bounds = {bounds.x + UI_BORDER_WIDTH,top,UI_STATUS_COUNT_WIDTH,height};
-    count_label->bounds = {count_clip->bounds.x + UI_TEXT_PADDING,top + UI_TEXT_PADDING,UI_STATUS_COUNT_WIDTH - UI_TEXT_PADDING * 2,UI_LINE_HEIGHT};
+    count_label->bounds = {count_clip->bounds.x + UI_TEXT_PADDING,label_top,UI_STATUS_COUNT_WIDTH - UI_TEXT_PADDING * 2,UI_FONT_HEIGHT};
     count_label->caption = count_text;
     timing_clip->bounds = {count_clip->bounds.x + count_clip->bounds.w + UI_BORDER_WIDTH,top,UI_STATUS_TIME_WIDTH,height};
-    timing_label->bounds = {timing_clip->bounds.x + UI_TEXT_PADDING,top + UI_TEXT_PADDING,UI_STATUS_TIME_WIDTH - UI_TEXT_PADDING * 2,UI_LINE_HEIGHT};
+    timing_label->bounds = {timing_clip->bounds.x + UI_TEXT_PADDING,label_top,UI_STATUS_TIME_WIDTH - UI_TEXT_PADDING * 2,UI_FONT_HEIGHT};
     timing_label->caption = timing_text;
     int left = timing_clip->bounds.x + timing_clip->bounds.w + UI_BORDER_WIDTH;
     text_clip->bounds = {left,top,std::max(0,bounds.x + bounds.w - progress_offset - UI_BORDER_WIDTH - left),height};
-    label->bounds = {left + UI_TEXT_PADDING,top + UI_TEXT_PADDING,std::max(0,text_clip->bounds.w - UI_TEXT_PADDING * 2),UI_LINE_HEIGHT};
+    label->bounds = {left + UI_TEXT_PADDING,label_top,std::max(0,text_clip->bounds.w - UI_TEXT_PADDING * 2),UI_FONT_HEIGHT};
     label->caption = text;
-    meter->bounds = {bounds.x + bounds.w - progress_offset,bounds.y + progress_top,progress_width,UI_FONT_HEIGHT + UI_TEXT_PADDING * 2};
+    meter->bounds = {bounds.x + bounds.w - progress_offset,bounds.y + progress_top,progress_width,std::max(0,bounds.h - progress_top * 2)};
     meter->busy = busy;
     meter->progress = progress;
 }

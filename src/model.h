@@ -11,6 +11,7 @@
 #include "json.h"
 #include "storage.h"
 #include "model_types.h"
+#include "tensor_names.h"
 
 #define MODEL_ERROR_OPEN 1
 #define MODEL_ERROR_FORMAT 2

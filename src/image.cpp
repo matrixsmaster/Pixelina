@@ -5,12 +5,11 @@
  * License: MIT
  */
 #include <algorithm>
-#include <cctype>
-#include <cmath>
-#include <cstdio>
-#include <limits>
-#include <climits>
-#include <cstring>
+#include <ctype.h>
+#include <math.h>
+#include <stdio.h>
+#include <limits.h>
+#include <string.h>
 #include <unistd.h>
 #include "storage.h"
 #include "image.h"
@@ -19,6 +18,53 @@
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "../third_party/stb_image.h"
 #include "../third_party/stb_image_write.h"
+
+#define SIMPLEWEBP_IMPLEMENTATION
+#include "../third_party/simplewebp.h"
+
+static bool webp_load(const std::string &path, PixImage &image, std::string &error)
+{
+    FILE* file = fopen(path.c_str(),"rb");
+    if (!file) {
+        error = "Cannot read WebP image: " + path;
+        return false;
+    }
+    // SimpleWebP takes ownership of the file on both success and failure.
+    simplewebp* decoder = NULL;
+    simplewebp_error result = simplewebp_load_from_file(file,NULL,&decoder);
+    if (result != SIMPLEWEBP_NO_ERROR) {
+        error = "Cannot read WebP image (" + std::string(simplewebp_get_error_text(result)) + "): " + path;
+        return false;
+    }
+    size_t width, height;
+    simplewebp_get_dimensions(decoder,&width,&height);
+    if (!width || !height || width > INT_MAX / 4 || height > INT_MAX || uint64_t(width) * height > PIXELINA_MAX_PIXELS || uint64_t(width) * height > SIZE_MAX / 4) {
+        simplewebp_unload(decoder);
+        error = "WebP dimensions exceed the supported memory bound.";
+        return false;
+    }
+    size_t pixels = width * height;
+    std::vector<unsigned char> rgba(pixels * 4);
+    result = simplewebp_decode(decoder,rgba.data(),NULL);
+    simplewebp_unload(decoder);
+    if (result != SIMPLEWEBP_NO_ERROR) {
+        error = "Cannot decode WebP image (" + std::string(simplewebp_get_error_text(result)) + "): " + path;
+        return false;
+    }
+    bool alpha = false;
+    for (size_t pixel = 0; pixel < pixels && !alpha; pixel++) alpha = rgba[pixel * 4 + 3] != 255;
+    PixImage loaded;
+    loaded.width = (int)width;
+    loaded.height = (int)height;
+    loaded.rgb.resize(pixels * 3);
+    if (alpha) loaded.alpha.resize(pixels);
+    for (size_t pixel = 0; pixel < pixels; pixel++) {
+        std::copy_n(rgba.data() + pixel * 4,3,loaded.rgb.data() + pixel * 3);
+        if (alpha) loaded.alpha[pixel] = rgba[pixel * 4 + 3];
+    }
+    image = std::move(loaded);
+    return true;
+}
 
 bool image_decode(const unsigned char* bytes, size_t count, PixImage &image, std::string &error)
 {
@@ -32,33 +78,35 @@ bool image_decode(const unsigned char* bytes, size_t count, PixImage &image, std
         error = "Cannot decode embedded image.";
         return false;
     }
-    image.width = width;
-    image.height = height;
-    image.rgb.resize(size_t(width) * height * 3);
-    image.alpha.clear();
-    // Composite embedded icon transparency against the About dialog's white background.
-    for (size_t pixel = 0; pixel < size_t(width) * height; pixel++) {
-        unsigned alpha = rgb[pixel * 4 + 3];
-        for (size_t channel = 0; channel < 3; channel++) image.rgb[pixel * 3 + channel] = (unsigned(rgb[pixel * 4 + channel]) * alpha + 255 * (255 - alpha)) / 255;
+    PixImage decoded;
+    decoded.width = width;
+    decoded.height = height;
+    size_t pixels = size_t(width) * height;
+    decoded.rgb.resize(pixels * 3);
+    if (channels == 2 || channels == 4) decoded.alpha.resize(pixels);
+    for (size_t pixel = 0; pixel < pixels; pixel++) {
+        std::copy_n(rgb + pixel * 4,3,decoded.rgb.data() + pixel * 3);
+        if (!decoded.alpha.empty()) decoded.alpha[pixel] = rgb[pixel * 4 + 3];
     }
     stbi_image_free(rgb);
+    image = std::move(decoded);
     return true;
 }
 
 bool image_load(const std::string &path, PixImage &image, std::string &error)
 {
     int width,height,channels;
-    if (!stbi_info(path.c_str(),&width,&height,&channels)) {
-        error = "Cannot read image: " + path;
-        return false;
+    unsigned char* rgb = NULL;
+    if (stbi_info(path.c_str(),&width,&height,&channels)) {
+        if (width <= 0 || height <= 0 || uint64_t(width) * height > PIXELINA_MAX_PIXELS) {
+            error = "Image dimensions exceed the supported memory bound.";
+            return false;
+        }
+        rgb = stbi_load(path.c_str(),&width,&height,&channels,4);
     }
-    if (width <= 0 || height <= 0 || uint64_t(width) * height > PIXELINA_MAX_PIXELS) {
-        error = "Image dimensions exceed the supported memory bound.";
-        return false;
-    }
-    unsigned char* rgb = stbi_load(path.c_str(),&width,&height,&channels,4);
     if (!rgb) {
-        error = "Cannot decode image: " + path;
+        if (webp_load(path,image,error)) return true;
+        error = "Unknown or unsupported image: " + path;
         return false;
     }
     PixImage loaded;
@@ -84,20 +132,20 @@ bool image_save(const std::string &path, const PixImage &image, std::string &err
     }
     size_t dot = path.find_last_of('.');
     std::string suffix = dot == std::string::npos? "" : path.substr(dot);
-    std::transform(suffix.begin(),suffix.end(),suffix.begin(),[](unsigned char ch) { return std::tolower(ch); });
+    std::transform(suffix.begin(),suffix.end(),suffix.begin(),[](unsigned char ch) { return tolower(ch); });
     if (suffix != PIXELINA_EXT_PNG && suffix != PIXELINA_EXT_JPG && suffix != PIXELINA_EXT_JPEG) {
         error = "Save as requires a .png, .jpg or .jpeg extension.";
         return false;
     }
-    FILE* file = std::fopen(path.c_str(),"wb");
+    FILE* file = fopen(path.c_str(),"wb");
     if (!file) {
         error = "Cannot write image: " + path;
         return false;
     }
     bool failed = false;
     auto writer = [](void* context, void* data, int size) {
-        auto pair = static_cast<std::pair<FILE*,bool*>*>(context);
-        if (std::fwrite(data,1,size,pair->first) != size_t(size)) *pair->second = true;
+        auto pair = (std::pair<FILE*,bool*>*)context;
+        if (fwrite(data,1,size,pair->first) != size_t(size)) *pair->second = true;
     };
     std::pair<FILE*,bool*> context = {file,&failed};
     int result = 0;
@@ -114,9 +162,9 @@ bool image_save(const std::string &path, const PixImage &image, std::string &err
         result = stbi_write_png_to_func(writer,&context,image.width,image.height,channels,rgba.empty()? image.rgb.data() : rgba.data(),image.width * channels);
     }
     else if (suffix == PIXELINA_EXT_JPG || suffix == PIXELINA_EXT_JPEG) result = stbi_write_jpg_to_func(writer,&context,image.width,image.height,3,image.rgb.data(),PIXELINA_JPG_QUALITY);
-    if (std::fflush(file)) failed = true;
+    if (fflush(file)) failed = true;
     if (fsync(fileno(file))) failed = true;
-    if (std::fclose(file)) failed = true;
+    if (fclose(file)) failed = true;
     if (!result || failed) {
         if (error.empty()) error = "Image write failed: " + path;
         return false;
@@ -152,7 +200,7 @@ struct PixImageTap {
 
 static double image_filter(double distance, PixImageFilter filter)
 {
-    double x = std::abs(distance);
+    double x = fabs(distance);
     switch (filter) {
     case PIX_IMAGE_BICUBIC:
         if (x < 1) return ((IMAGE_BICUBIC_COEFFICIENT + IMAGE_BICUBIC_INNER_QUADRATIC) * x - (IMAGE_BICUBIC_COEFFICIENT + IMAGE_BICUBIC_INNER_LINEAR)) * x * x + 1;
@@ -161,7 +209,7 @@ static double image_filter(double distance, PixImageFilter filter)
     case PIX_IMAGE_LANCZOS:
         if (!x) return 1;
         if (x >= IMAGE_LANCZOS_RADIUS) return 0;
-        return std::sin(M_PI * x) * std::sin(M_PI * x / IMAGE_LANCZOS_RADIUS) / (M_PI * M_PI * x * x / IMAGE_LANCZOS_RADIUS);
+        return sin(M_PI * x) * sin(M_PI * x / IMAGE_LANCZOS_RADIUS) / (M_PI * M_PI * x * x / IMAGE_LANCZOS_RADIUS);
     }
     return 0;
 }
@@ -183,7 +231,7 @@ static std::vector<PixImageTap> image_taps(int source, int target, PixImageFilte
             weights.push_back(weight);
             total += weight;
         }
-        if (!total || !std::isfinite(total)) return {};
+        if (!total || !isfinite(total)) return {};
         for (double weight : weights) {
             double coefficient = weight / total * IMAGE_RESAMPLE_ONE;
             tap.coefficients.push_back(int32_t(coefficient < 0? coefficient - 0.5 : coefficient + 0.5));

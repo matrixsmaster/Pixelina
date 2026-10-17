@@ -21,18 +21,18 @@ static bool qwen_image_weight(const PixModelFile &file, const std::string &name,
 
 static bool qwen_image_diffuser_valid(const PixModelFile &file, std::string &error)
 {
-    if (!qwen_image_weight(file,"img_in.weight",{QWEN_IMAGE_CHANNELS,QWEN_IMAGE_HIDDEN},error) || !qwen_image_weight(file,"proj_out.weight",{QWEN_IMAGE_HIDDEN,QWEN_IMAGE_CHANNELS},error)) return false;
-    if (!qwen_image_weight(file,QWEN_IMAGE_TEXT_NORM,{QWEN_VL_HIDDEN},error) || !qwen_image_weight(file,"txt_in.in_layer.weight",{QWEN_VL_HIDDEN,QWEN_IMAGE_HIDDEN},error) || !qwen_image_weight(file,"txt_in.out_layer.weight",{QWEN_IMAGE_HIDDEN,QWEN_IMAGE_HIDDEN},error)) return false;
-    if (!qwen_image_weight(file,"time_text_embed.timestep_embedder.linear_1.weight",{QWEN_IMAGE_TIME_DIM,QWEN_IMAGE_HIDDEN},error) || !qwen_image_weight(file,"time_text_embed.timestep_embedder.linear_2.weight",{QWEN_IMAGE_HIDDEN,QWEN_IMAGE_HIDDEN},error)) return false;
-    if (!qwen_image_weight(file,"modulation.1.weight",{QWEN_IMAGE_HIDDEN,QWEN_IMAGE_MODULATION_PARTS * QWEN_IMAGE_HIDDEN},error) || !qwen_image_weight(file,"norm_out.linear.weight",{QWEN_IMAGE_HIDDEN,QWEN_IMAGE_HIDDEN},error)) return false;
+    if (!qwen_image_weight(file,QWEN_IMAGE_INPUT_PROJECTION WEIGHT_SUFFIX,{QWEN_IMAGE_CHANNELS,QWEN_IMAGE_HIDDEN},error) || !qwen_image_weight(file,QWEN_IMAGE_OUTPUT_PROJECTION WEIGHT_SUFFIX,{QWEN_IMAGE_HIDDEN,QWEN_IMAGE_CHANNELS},error)) return false;
+    if (!qwen_image_weight(file,QWEN_IMAGE_TEXT_NORM,{QWEN_VL_HIDDEN},error) || !qwen_image_weight(file,QWEN_IMAGE_TEXT_INPUT WEIGHT_SUFFIX,{QWEN_VL_HIDDEN,QWEN_IMAGE_HIDDEN},error) || !qwen_image_weight(file,QWEN_IMAGE_TEXT_OUTPUT WEIGHT_SUFFIX,{QWEN_IMAGE_HIDDEN,QWEN_IMAGE_HIDDEN},error)) return false;
+    if (!qwen_image_weight(file,QWEN_IMAGE_TIME_FIRST WEIGHT_SUFFIX,{QWEN_IMAGE_TIME_DIM,QWEN_IMAGE_HIDDEN},error) || !qwen_image_weight(file,QWEN_IMAGE_TIME_SECOND WEIGHT_SUFFIX,{QWEN_IMAGE_HIDDEN,QWEN_IMAGE_HIDDEN},error)) return false;
+    if (!qwen_image_weight(file,QWEN_IMAGE_MODULATION WEIGHT_SUFFIX,{QWEN_IMAGE_HIDDEN,QWEN_IMAGE_MODULATION_PARTS * QWEN_IMAGE_HIDDEN},error) || !qwen_image_weight(file,QWEN_IMAGE_OUTPUT_NORM WEIGHT_SUFFIX,{QWEN_IMAGE_HIDDEN,QWEN_IMAGE_HIDDEN},error)) return false;
     for (size_t layer = 0; layer < QWEN_IMAGE_LAYERS; layer++) {
-        std::string prefix = QWEN_IMAGE_BLOCK_PREFIX + std::to_string(layer) + ".";
-        const char* projections[] = {"attn.to_q.weight","attn.to_k.weight","attn.to_v.weight","attn.to_out.0.weight"};
+        std::string prefix = QWEN_IMAGE_BLOCK_PREFIX + std::to_string(layer) + TENSOR_NAME_SEPARATOR;
+        const char* projections[] = {QWEN_IMAGE_QUERY WEIGHT_SUFFIX,QWEN_IMAGE_KEY WEIGHT_SUFFIX,QWEN_IMAGE_VALUE WEIGHT_SUFFIX,QWEN_IMAGE_ATTENTION_OUTPUT WEIGHT_SUFFIX};
         for (const char* projection : projections) {
             if (!qwen_image_weight(file,prefix + projection,{QWEN_IMAGE_HIDDEN,QWEN_IMAGE_HIDDEN},error)) return false;
         }
         if (!qwen_image_weight(file,prefix + QWEN_IMAGE_QUERY_NORM,{QWEN_IMAGE_HEAD_DIM},error) || !qwen_image_weight(file,prefix + QWEN_IMAGE_KEY_NORM,{QWEN_IMAGE_HEAD_DIM},error)) return false;
-        if (!qwen_image_weight(file,prefix + QWEN_IMAGE_FFN_FUSED_WEIGHT,{QWEN_IMAGE_HIDDEN,QWEN_IMAGE_MLP * 2},error) || !qwen_image_weight(file,prefix + "img_mlp.out.weight",{QWEN_IMAGE_MLP,QWEN_IMAGE_HIDDEN},error)) return false;
+        if (!qwen_image_weight(file,prefix + QWEN_IMAGE_FFN_FUSED_WEIGHT,{QWEN_IMAGE_HIDDEN,QWEN_IMAGE_MLP * 2},error) || !qwen_image_weight(file,prefix + QWEN_IMAGE_FFN_OUTPUT WEIGHT_SUFFIX,{QWEN_IMAGE_MLP,QWEN_IMAGE_HIDDEN},error)) return false;
     }
     return true;
 }
@@ -179,9 +179,9 @@ static PixTensor qwen_image_timestep(const PixModelFile &diffuser, float sigma)
             input.values[row * input.channels + pair + QWEN_IMAGE_TIME_DIM / 2] = std::sin(angle);
         }
     }
-    PixTensor hidden = tensor_linear(diffuser,"time_text_embed.timestep_embedder.linear_1",input,false);
+    PixTensor hidden = tensor_linear(diffuser,QWEN_IMAGE_TIME_FIRST,input,false);
     tensor_silu(hidden);
-    return tensor_linear(diffuser,"time_text_embed.timestep_embedder.linear_2",hidden,false);
+    return tensor_linear(diffuser,QWEN_IMAGE_TIME_SECOND,hidden,false);
 }
 
 static PixTensor qwen_image_cached_kv(const PixTensor &prefix, const PixTensor &target)
@@ -211,9 +211,9 @@ static PixTensor qwen_image_diffuse_run(const PixModelFile &diffuser, const PixT
         for (float &value : zero_center) value += 1;
         PixTensor text = tensor_gather(condition.hidden,layout.text_sources);
         text = tensor_norm(text,zero_center,QWEN_IMAGE_EPSILON);
-        text = tensor_linear(diffuser,"txt_in.in_layer",text,false);
+        text = tensor_linear(diffuser,QWEN_IMAGE_TEXT_INPUT,text,false);
         tensor_gelu(text,true);
-        text = tensor_linear(diffuser,"txt_in.out_layer",text,false);
+        text = tensor_linear(diffuser,QWEN_IMAGE_TEXT_OUTPUT,text,false);
         if (!tensor_scatter(hidden,text,layout.text_rows)) return {};
         text = PixTensor();
         for (size_t i = 0; i < references.size(); i++) {
@@ -229,15 +229,15 @@ static PixTensor qwen_image_diffuse_run(const PixModelFile &diffuser, const PixT
     image = PixTensor();
     PixTensor time = qwen_image_timestep(diffuser,sigma);
     tensor_silu(time);
-    PixTensor modulation = tensor_linear(diffuser,"modulation.1",time,false);
+    PixTensor modulation = tensor_linear(diffuser,QWEN_IMAGE_MODULATION,time,false);
     const PixRotary &rotary = reuse? cache->rotary : layout.rotary;
     std::vector<PixAttentionRange> target_attention = {{0,target.rows,layout.rows,false}};
     const std::vector<PixAttentionRange> &attention = reuse? target_attention : layout.attention;
     for (size_t layer = 0; layer < QWEN_IMAGE_LAYERS; layer++) {
-        std::string prefix = QWEN_IMAGE_BLOCK_PREFIX + std::to_string(layer) + ".";
+        std::string prefix = QWEN_IMAGE_BLOCK_PREFIX + std::to_string(layer) + TENSOR_NAME_SEPARATOR;
         PixTensor normalized = tensor_norm(hidden,{},QWEN_IMAGE_EPSILON,true);
         qwen_image_modulate(normalized,modulation,target_begin,0,nullptr);
-        PixTensor q = tensor_linear(diffuser,prefix + "attn.to_q",normalized,false),k = tensor_linear(diffuser,prefix + "attn.to_k",normalized,false),v = tensor_linear(diffuser,prefix + "attn.to_v",normalized,false);
+        PixTensor q = tensor_linear(diffuser,prefix + QWEN_IMAGE_QUERY,normalized,false),k = tensor_linear(diffuser,prefix + QWEN_IMAGE_KEY,normalized,false),v = tensor_linear(diffuser,prefix + QWEN_IMAGE_VALUE,normalized,false);
         normalized = PixTensor();
         q.rows *= QWEN_IMAGE_HEADS;
         q.channels = QWEN_IMAGE_HEAD_DIM;
@@ -262,7 +262,7 @@ static PixTensor qwen_image_diffuse_run(const PixModelFile &diffuser, const PixT
         }
         PixTensor attended = tensor_attention(q,k,v,QWEN_IMAGE_HEADS,QWEN_IMAGE_HEADS,attention,offset);
         q = k = v = PixTensor();
-        PixTensor projected = tensor_linear(diffuser,prefix + "attn.to_out.0",attended,false);
+        PixTensor projected = tensor_linear(diffuser,prefix + QWEN_IMAGE_ATTENTION_OUTPUT,attended,false);
         attended = PixTensor();
         qwen_image_modulate(hidden,modulation,target_begin,1,&projected);
         projected = PixTensor();
@@ -273,7 +273,7 @@ static PixTensor qwen_image_diffuse_run(const PixModelFile &diffuser, const PixT
         tensor_silu(gate);
         tensor_gate(gate,up);
         up = PixTensor();
-        projected = tensor_linear(diffuser,prefix + "img_mlp.out",gate,false);
+        projected = tensor_linear(diffuser,prefix + QWEN_IMAGE_FFN_OUTPUT,gate,false);
         gate = PixTensor();
         qwen_image_modulate(hidden,modulation,target_begin,3,&projected);
         if (hidden.values.empty()) return {};
@@ -282,9 +282,9 @@ static PixTensor qwen_image_diffuse_run(const PixModelFile &diffuser, const PixT
     PixTensor output = tensor_slice(hidden,target_begin,target.rows,0,hidden.channels);
     hidden = PixTensor();
     output = tensor_norm(output,{},QWEN_IMAGE_EPSILON,true);
-    PixTensor scale = tensor_linear(diffuser,"norm_out.linear",time,false);
+    PixTensor scale = tensor_linear(diffuser,QWEN_IMAGE_OUTPUT_NORM,time,false);
     qwen_image_modulate(output,scale,0,0,nullptr);
-    return tensor_linear(diffuser,"proj_out",output,false);
+    return tensor_linear(diffuser,QWEN_IMAGE_OUTPUT_PROJECTION,output,false);
 }
 
 PixTensor qwen_image_diffuse(const PixModelFile &diffuser, const PixTensor &target, const std::vector<PixTensor> &references, const PixQwenCondition &condition, const PixQwenLayout &layout, float sigma, const InferenceProgress &progress, PixQwenKVCache* cache)
@@ -506,7 +506,7 @@ static uint64_t qwen_image_largest_weight(const PixModelFile &model, PixQwenStag
     uint64_t largest = 0;
     for (const auto &entry : model.weights) {
         const PixWeight &weight = entry.second;
-        if (stage == QWEN_STAGE_LANGUAGE && (weight.name == "output.weight" || weight.name == "token_embd.weight")) continue;
+        if (stage == QWEN_STAGE_LANGUAGE && (weight.name == QWEN_CHAT_OUTPUT WEIGHT_SUFFIX || weight.name == QWEN_VL_EMBEDDING_WEIGHT)) continue;
         uint64_t bytes = weight.bytes;
         if (stage == QWEN_STAGE_DIFFUSION && weight.name.find(QWEN_IMAGE_FFN_FUSED_WEIGHT) != std::string::npos) bytes /= 2;
         largest = std::max(largest,bytes);

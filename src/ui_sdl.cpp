@@ -5,28 +5,11 @@
  * License: MIT
  */
 #include "ui_sdl.h"
-#include <cmath>
+#include <stdlib.h>
 
 PixUISDLCanvas::~PixUISDLCanvas()
 {
     if (scaled_texture) SDL_DestroyTexture(scaled_texture);
-}
-
-void PixUISDLCanvas::set_main_image(const PixImage* source, SDL_Texture* texture)
-{
-    if (scaled_texture) SDL_DestroyTexture(scaled_texture);
-    scaled_texture = nullptr;
-    scaled_width = scaled_height = 0;
-    main_image = source;
-    main_texture = texture;
-}
-
-void PixUISDLCanvas::set_color(unsigned color)
-{
-    if (color_valid && draw_color == color) return;
-    SDL_SetRenderDrawColor(renderer,(color >> 16) & 255,(color >> 8) & 255,color & 255,255);
-    draw_color = color;
-    color_valid = true;
 }
 
 void PixUISDLCanvas::fill(const PixUIRect &rect, unsigned color)
@@ -51,19 +34,49 @@ void PixUISDLCanvas::image(void* texture, const PixUIRect &rect)
             scaled_texture = nullptr;
             scaled_width = rect.w;
             scaled_height = rect.h;
-            PixImage resized = image_resize(*main_image,rect.w,rect.h,PIX_IMAGE_LANCZOS,PIX_IMAGE_RGB);
-            if (image_valid(resized)) {
-                scaled_texture = SDL_CreateTexture(renderer,SDL_PIXELFORMAT_RGB24,SDL_TEXTUREACCESS_STATIC,rect.w,rect.h);
-                if (scaled_texture && SDL_UpdateTexture(scaled_texture,nullptr,resized.rgb.data(),rect.w * 3)) {
-                    SDL_DestroyTexture(scaled_texture);
-                    scaled_texture = nullptr;
-                }
-            }
+            PixImage resized = image_resize(*main_image,rect.w,rect.h,PIX_IMAGE_LANCZOS,PIX_IMAGE_PREMULTIPLIED);
+            if (image_valid(resized)) scaled_texture = create_texture(resized);
         }
         if (scaled_texture) texture = scaled_texture;
     }
     SDL_Rect target = {rect.x,rect.y,rect.w,rect.h};
-    SDL_RenderCopy(renderer,static_cast<SDL_Texture*>(texture),nullptr,&target);
+    SDL_RenderCopy(renderer,(SDL_Texture*)texture,nullptr,&target);
+}
+
+SDL_Texture* PixUISDLCanvas::create_texture(const PixImage &source)
+{
+    if (!image_valid(source)) {
+        SDL_SetError("Invalid image data.");
+        return nullptr;
+    }
+    bool alpha = !source.alpha.empty();
+    Uint32 format = SDL_PIXELFORMAT_RGB24;
+    if (alpha) format = SDL_BYTEORDER == SDL_LIL_ENDIAN? SDL_PIXELFORMAT_ABGR8888 : SDL_PIXELFORMAT_RGBA8888;
+    SDL_Texture* texture = SDL_CreateTexture(renderer,format,SDL_TEXTUREACCESS_STATIC,source.width,source.height);
+    if (!texture) return nullptr;
+    std::vector<unsigned char> rgba;
+    if (alpha) {
+        rgba.resize(source.alpha.size() * 4);
+        for (size_t pixel = 0; pixel < source.alpha.size(); pixel++) {
+            for (size_t channel = 0; channel < 3; channel++) rgba[pixel * 4 + channel] = source.rgb[pixel * 3 + channel];
+            rgba[pixel * 4 + 3] = source.alpha[pixel];
+        }
+    }
+    int channels = alpha? 4 : 3;
+    if (SDL_UpdateTexture(texture,nullptr,alpha? rgba.data() : source.rgb.data(),source.width * channels) || SDL_SetTextureBlendMode(texture,alpha? SDL_BLENDMODE_BLEND : SDL_BLENDMODE_NONE)) {
+        SDL_DestroyTexture(texture);
+        return nullptr;
+    }
+    return texture;
+}
+
+void PixUISDLCanvas::set_main_image(const PixImage* source, SDL_Texture* texture)
+{
+    if (scaled_texture) SDL_DestroyTexture(scaled_texture);
+    scaled_texture = nullptr;
+    scaled_width = scaled_height = 0;
+    main_image = source;
+    main_texture = texture;
 }
 
 bool PixUISDLCanvas::clip(PixUIRect &rect) const
@@ -113,18 +126,17 @@ PixUIRect PixUISDLCanvas::window_rect() const
     return result;
 }
 
-void PixUISDLCanvas::pointer_position(int &x, int &y) const
-{
-    SDL_GetGlobalMouseState(&x,&y);
-}
-
 void PixUISDLCanvas::window_command(PixUIWindowCommand command, const PixUIRect &rect)
 {
+    if (command != PIXUI_MOVE && command != PIXUI_RESIZE) {
+        pending_move = false;
+        pending_resize = false;
+    }
     switch (command) {
     case PIXUI_RESTORE: {
         PixUIRect current = window_rect();
         PixUIRect normal = restored_window;
-        bool default_size = maximized() && std::abs(current.w - restored_window.w) <= UI_RESTORE_SIZE_TOLERANCE && std::abs(current.h - restored_window.h) <= UI_RESTORE_SIZE_TOLERANCE;
+        bool default_size = maximized() && abs(current.w - restored_window.w) <= UI_RESTORE_SIZE_TOLERANCE && abs(current.h - restored_window.h) <= UI_RESTORE_SIZE_TOLERANCE;
         if (default_size) {
             normal.w = UI_START_WIDTH;
             normal.h = UI_START_HEIGHT;
@@ -146,18 +158,36 @@ void PixUISDLCanvas::window_command(PixUIWindowCommand command, const PixUIRect 
         SDL_MaximizeWindow(window);
         break;
     case PIXUI_MOVE:
-        SDL_SetWindowPosition(window,rect.x,rect.y);
+        pending_window.x = rect.x;
+        pending_window.y = rect.y;
+        pending_move = true;
         break;
     case PIXUI_RESIZE:
-        SDL_SetWindowSize(window,rect.w,rect.h);
+        pending_window.w = rect.w;
+        pending_window.h = rect.h;
+        pending_resize = true;
         break;
     default: break;
     }
 }
 
+void PixUISDLCanvas::flush_window_commands()
+{
+    // Mouse events in one batch share the native geometry from before these changes.
+    if (pending_move) SDL_SetWindowPosition(window,pending_window.x,pending_window.y);
+    if (pending_resize) SDL_SetWindowSize(window,pending_window.w,pending_window.h);
+    pending_move = false;
+    pending_resize = false;
+}
+
 bool PixUISDLCanvas::maximized() const
 {
     return SDL_GetWindowFlags(window) & SDL_WINDOW_MAXIMIZED;
+}
+
+void PixUISDLCanvas::window_title(const std::string &title)
+{
+    SDL_SetWindowTitle(window,title.c_str());
 }
 
 static int portable_modifiers(SDL_Keymod state)
@@ -172,7 +202,7 @@ PixUIEvent PixUISDLCanvas::translate(const SDL_Event &input)
     switch (input.type) {
     case SDL_KEYDOWN:
         result.type = PIXUI_KEY;
-        result.mod = portable_modifiers(static_cast<SDL_Keymod>(input.key.keysym.mod));
+        result.mod = portable_modifiers((SDL_Keymod)input.key.keysym.mod);
         switch (input.key.keysym.sym) {
         case SDLK_RETURN:
             result.key = PIXUI_RETURN;
@@ -219,6 +249,9 @@ PixUIEvent PixUISDLCanvas::translate(const SDL_Event &input)
         case SDLK_F5:
             result.key = PIXUI_F5;
             break;
+        case SDLK_F6:
+            result.key = PIXUI_F6;
+            break;
         case SDLK_F11:
             result.key = PIXUI_F11;
             break;
@@ -256,7 +289,10 @@ PixUIEvent PixUISDLCanvas::translate(const SDL_Event &input)
     return result;
 }
 
-void PixUISDLCanvas::window_title(const std::string &title)
+void PixUISDLCanvas::set_color(unsigned color)
 {
-    SDL_SetWindowTitle(window,title.c_str());
+    if (color_valid && draw_color == color) return;
+    SDL_SetRenderDrawColor(renderer,(color >> 16) & 255,(color >> 8) & 255,color & 255,255);
+    draw_color = color;
+    color_valid = true;
 }

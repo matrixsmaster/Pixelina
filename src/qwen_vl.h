@@ -10,30 +10,6 @@
 #include <array>
 #include "inference.h"
 
-#define QWEN_VL_EMBEDDING_WEIGHT "token_embd.weight"
-#define QWEN_VL_BLOCK_PREFIX "blk."
-#define QWEN_VL_ATTENTION_NORM "attn_norm.weight"
-#define QWEN_VL_FFN_NORM "ffn_norm.weight"
-#define QWEN_VL_QUERY_NORM "attn_q_norm.weight"
-#define QWEN_VL_KEY_NORM "attn_k_norm.weight"
-#define QWEN_VISION_PATCH_WEIGHT "v.patch_embd.weight"
-#define QWEN_VISION_PATCH_SECOND_WEIGHT "v.patch_embd.weight.1"
-#define QWEN_VISION_PATCH_BIAS "v.patch_embd.bias"
-#define QWEN_VISION_POSITION_WEIGHT "v.position_embd.weight"
-#define QWEN_VISION_BLOCK_PREFIX "v.blk."
-#define QWEN_VISION_ATTENTION_NORM "ln1"
-#define QWEN_VISION_FFN_NORM "ln2"
-#define QWEN_VISION_QKV "attn_qkv"
-#define QWEN_VISION_ATTENTION_OUTPUT "attn_out"
-#define QWEN_VL_FFN_UP "ffn_up"
-#define QWEN_VL_FFN_DOWN "ffn_down"
-#define QWEN_VISION_MERGER_PREFIX "mm."
-#define QWEN_VISION_DEEP_PREFIX "v.deepstack."
-#define QWEN_VISION_FINAL_NORM "v.post_ln"
-#define QWEN_VISION_MERGER_NORM "norm"
-#define QWEN_VISION_MERGER_FIRST "fc1"
-#define QWEN_VISION_MERGER_SECOND "fc2"
-
 #define QWEN_VL_HIDDEN 4096
 #define QWEN_VL_MLP 12288
 #define QWEN_VL_LAYERS 36

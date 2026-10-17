@@ -5,12 +5,12 @@
  * License: MIT
  */
 #include <algorithm>
-#include <cerrno>
-#include <climits>
-#include <cmath>
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
+#include <errno.h>
+#include <limits.h>
+#include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <fcntl.h>
 #include <iomanip>
 #include <limits>
@@ -23,7 +23,7 @@ bool parse_unsigned(const std::string &text, uint64_t &value)
 {
     char* end;
     errno = 0;
-    unsigned long long parsed = std::strtoull(text.c_str(),&end,0);
+    unsigned long long parsed = strtoull(text.c_str(),&end,0);
     if (end != text.c_str() + text.size() || errno == ERANGE) return false;
     value = parsed;
     return true;
@@ -33,7 +33,7 @@ bool parse_float(const std::string &text, float &value)
 {
     char* end;
     errno = 0;
-    float parsed = std::strtof(text.c_str(),&end);
+    float parsed = strtof(text.c_str(),&end);
     if (end == text.c_str() || end != text.c_str() + text.size() || errno == ERANGE) return false;
     value = parsed;
     return true;
@@ -44,7 +44,7 @@ bool settings_valid(const PixSettings &settings, std::string &error)
     if (settings.width <= 0 || settings.height <= 0 || settings.width % PIXELINA_IMAGE_MULTIPLE || settings.height % PIXELINA_IMAGE_MULTIPLE) error = "Width and height must be positive multiples of 16.";
     else if (uint64_t(settings.width) * settings.height > PIXELINA_MAX_PIXELS) error = "Image dimensions exceed the supported memory bound.";
     else if (settings.steps <= 0) error = "Steps must be positive.";
-    else if (!std::isfinite(settings.shift) || settings.shift <= 0) error = "Scheduler shift must be finite and positive.";
+    else if (!isfinite(settings.shift) || settings.shift <= 0) error = "Scheduler shift must be finite and positive.";
     else if (settings.backend != PIXELINA_CPU && settings.backend != PIXELINA_VULKAN) error = "Unknown backend.";
     else if (settings.format != PIXELINA_JPG && settings.format != PIXELINA_PNG) error = "Unknown output format.";
     else if (settings.diffuser.empty() || settings.encoder.empty() || settings.vae.empty()) error = "Select all three model files.";
@@ -115,20 +115,20 @@ std::string database_record(const PixRecord &record)
     return out.str();
 }
 
-bool database_parse(const std::string &text, std::vector<PixRecord> &records, std::string &error)
+bool database_parse(const std::string &text, std::vector<PixRecord> &records, std::string &error, bool allow_empty_filename)
 {
     std::vector<PixRecord> parsed;
     size_t start = 0;
     while (start < text.size()) {
         PixRecord record;
         size_t count = 0,cursor = start;
-        if (!text.compare(start,std::strlen(PIXELINA_LOG_GEN_VERSION),PIXELINA_LOG_GEN_VERSION)) {
+        if (!text.compare(start,strlen(PIXELINA_LOG_GEN_VERSION),PIXELINA_LOG_GEN_VERSION)) {
             count = PIXELINA_LOG_GEN_FIELDS;
-            cursor += std::strlen(PIXELINA_LOG_GEN_VERSION);
-        } else if (!text.compare(start,std::strlen(PIXELINA_LOG_EDIT_VERSION),PIXELINA_LOG_EDIT_VERSION)) {
+            cursor += strlen(PIXELINA_LOG_GEN_VERSION);
+        } else if (!text.compare(start,strlen(PIXELINA_LOG_EDIT_VERSION),PIXELINA_LOG_EDIT_VERSION)) {
             record.model = PIX_MODEL_QWEN_IMAGE;
             count = PIXELINA_LOG_EDIT_FIELDS;
-            cursor += std::strlen(PIXELINA_LOG_EDIT_VERSION);
+            cursor += strlen(PIXELINA_LOG_EDIT_VERSION);
         } else {
             error = "Malformed database record or unsupported log version at byte " + std::to_string(start) + ".";
             return false;
@@ -211,7 +211,7 @@ bool database_parse(const std::string &text, std::vector<PixRecord> &records, st
             break;
         }
         }
-        if (record.filename.empty()) {
+        if (record.filename.empty() && !allow_empty_filename) {
             error = "Missing result filename in database.";
             return false;
         }
@@ -258,24 +258,68 @@ static bool storage_write(const std::string &path, const std::string &text, std:
     return true;
 }
 
-bool config_load(const std::string &directory, std::map<std::string,std::string> &values, std::string &error)
+bool job_file_load(const std::string &path, std::string &directory, std::vector<PixRecord> &records, std::string &error)
 {
-    std::string path = path_join(directory,PIXELINA_CONFIG);
-    FILE* file = std::fopen(path.c_str(),"rb");
+    FILE* file = fopen(path.c_str(),"rb");
     if (!file) {
-        if (errno == ENOENT) {
-            values.clear();
-            return true;
-        }
-        error = "Cannot read configuration: " + std::string(std::strerror(errno));
+        error = "Cannot read job file: " + path;
         return false;
     }
     std::string text;
     char buffer[BUFSIZ];
     size_t count;
-    while ((count = std::fread(buffer,1,sizeof(buffer),file))) text.append(buffer,count);
-    bool failed = std::ferror(file);
-    std::fclose(file);
+    while ((count = fread(buffer,1,sizeof(buffer),file))) text.append(buffer,count);
+    bool failed = ferror(file);
+    fclose(file);
+    if (failed) {
+        error = "Job file read failed: " + path;
+        return false;
+    }
+    size_t newline = text.find('\n');
+    std::string header = text.substr(0,newline);
+    if (!header.empty() && header.back() == '\r') header.pop_back();
+    if (newline == std::string::npos || header.empty() || header.find('\0') != std::string::npos) {
+        error = "Missing work directory in job file.";
+        return false;
+    }
+    if (!database_parse(text.substr(newline + 1),records,error,true)) return false;
+    directory = header;
+    return true;
+}
+
+bool job_file_save(const std::string &path, const std::string &directory, const std::vector<PixRecord> &records, std::string &error)
+{
+    if (directory.empty() || directory.find_first_of("\r\n") != std::string::npos) {
+        error = "Cannot export a job file with this work directory.";
+        return false;
+    }
+    std::string text = directory + '\n';
+    for (const PixRecord &record : records) {
+        PixRecord parameters = record;
+        parameters.filename.clear();
+        text += database_record(parameters);
+    }
+    return storage_write(path,text,error);
+}
+
+bool config_load(const std::string &directory, std::map<std::string,std::string> &values, std::string &error)
+{
+    std::string path = path_join(directory,PIXELINA_CONFIG);
+    FILE* file = fopen(path.c_str(),"rb");
+    if (!file) {
+        if (errno == ENOENT) {
+            values.clear();
+            return true;
+        }
+        error = "Cannot read configuration: " + std::string(strerror(errno));
+        return false;
+    }
+    std::string text;
+    char buffer[BUFSIZ];
+    size_t count;
+    while ((count = fread(buffer,1,sizeof(buffer),file))) text.append(buffer,count);
+    bool failed = ferror(file);
+    fclose(file);
     std::istringstream input(text);
     std::map<std::string,std::string> parsed;
     while (input >> std::ws && !input.eof()) {
@@ -304,21 +348,21 @@ bool config_save(const std::string &directory, const std::map<std::string,std::s
 bool bookmarks_load(const std::string &directory, std::vector<std::string> &paths, std::string &error)
 {
     std::string path = path_join(directory,PIXELINA_BOOKMARKS);
-    FILE* file = std::fopen(path.c_str(),"rb");
+    FILE* file = fopen(path.c_str(),"rb");
     if (!file) {
         if (errno == ENOENT) {
             paths.clear();
             return true;
         }
-        error = "Cannot read bookmarks: " + std::string(std::strerror(errno));
+        error = "Cannot read bookmarks: " + std::string(strerror(errno));
         return false;
     }
     std::string text;
     char buffer[BUFSIZ];
     size_t count;
-    while ((count = std::fread(buffer,1,sizeof(buffer),file))) text.append(buffer,count);
-    bool failed = std::ferror(file);
-    std::fclose(file);
+    while ((count = fread(buffer,1,sizeof(buffer),file))) text.append(buffer,count);
+    bool failed = ferror(file);
+    fclose(file);
     if (failed) {
         error = "Cannot read bookmarks: " + path;
         return false;
@@ -351,21 +395,21 @@ bool bookmarks_save(const std::string &directory, const std::vector<std::string>
 bool database_load(const std::string &directory, std::vector<PixRecord> &records, std::string &error, const std::string &database)
 {
     std::string path = database.empty()? path_join(directory,PIXELINA_DB) : database;
-    FILE* file = std::fopen(path.c_str(),"rb");
+    FILE* file = fopen(path.c_str(),"rb");
     if (!file) {
         if (errno == ENOENT) {
             records.clear();
             return true;
         }
-        error = "Cannot read database: " + std::string(std::strerror(errno));
+        error = "Cannot read database: " + std::string(strerror(errno));
         return false;
     }
     std::string text;
     char buffer[4096];
     size_t count;
-    while ((count = std::fread(buffer,1,sizeof(buffer),file))) text.append(buffer,count);
-    bool failed = std::ferror(file);
-    std::fclose(file);
+    while ((count = fread(buffer,1,sizeof(buffer),file))) text.append(buffer,count);
+    bool failed = ferror(file);
+    fclose(file);
     if (failed) {
         error = "Database read failed.";
         return false;
@@ -379,17 +423,17 @@ bool storage_save(const std::string &directory, PixRecord &record, const PixImag
     if (!database_load(directory,existing,error,database)) return false;
     char* canonical = realpath(directory.c_str(),nullptr);
     if (!canonical) {
-        error = "Cannot resolve output directory: " + std::string(std::strerror(errno));
+        error = "Cannot resolve output directory: " + std::string(strerror(errno));
         return false;
     }
 
     std::string output_directory = canonical;
-    std::free(canonical);
+    free(canonical);
     std::string filename,path;
     bool found = false;
     for (unsigned i = 1; i <= PIXELINA_MAX_IMAGE_NUMBER; i++) {
         char stem[32];
-        std::snprintf(stem,sizeof(stem),"p%05u",i);
+        snprintf(stem,sizeof(stem),"p%05u",i);
         bool used = false;
         for (const PixRecord &old : existing) {
             if (path_join(output_directory,old.filename) == path_join(output_directory,std::string(stem) + PIXELINA_EXT_JPG) || path_join(output_directory,old.filename) == path_join(output_directory,std::string(stem) + PIXELINA_EXT_PNG)) used = true;

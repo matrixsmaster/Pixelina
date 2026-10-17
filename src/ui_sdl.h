@@ -23,6 +23,7 @@ public:
     void fill(const PixUIRect &rect, unsigned color) override;
     void point(int x, int y, unsigned color) override;
     void image(void* texture, const PixUIRect &rect) override;
+    SDL_Texture* create_texture(const PixImage &source);
     void set_main_image(const PixImage* source, SDL_Texture* texture);
     bool clip(PixUIRect &rect) const override;
     void set_clip(const PixUIRect* rect) override;
@@ -31,8 +32,8 @@ public:
     void clipboard(const std::string &text) override;
     void text_input(const PixUIRect &rect) override;
     PixUIRect window_rect() const override;
-    void pointer_position(int &x, int &y) const override;
     void window_command(PixUIWindowCommand command, const PixUIRect &rect) override;
+    void flush_window_commands();
     bool maximized() const override;
     void window_title(const std::string &title) override;
     PixUIEvent translate(const SDL_Event &input);
@@ -50,6 +51,8 @@ private:
     bool color_valid = false; // renderer color has been set through this adapter
     bool clipped = false; // clipping enabled through this adapter
     PixUIRect clipping; // cached clip rectangle
+    PixUIRect pending_window; // latest drag geometry for the current input batch
+    bool pending_move = false,pending_resize = false; // native geometry changes deferred until input is drained
     void set_color(unsigned color);
 };
 

@@ -6,5 +6,5 @@ Exec=pixelina %f
 Icon=pixelina
 Terminal=false
 Categories=Graphics;
-MimeType=image/png;image/jpeg;
+MimeType=image/png;image/jpeg;image/webp;
 StartupWMClass=Pixelina

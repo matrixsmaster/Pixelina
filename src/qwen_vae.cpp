@@ -114,7 +114,7 @@ PixTensor qwen_vae_encode(const PixModelFile &vae, const PixImage &image, const 
     for (size_t level = 0; level < QWEN_VAE_LEVELS; level++) {
         std::string prefix = QWEN_VAE_ENCODER QWEN_VAE_DOWN_LEVEL_PREFIX + std::to_string(level) + QWEN_VAE_DOWN_BLOCK_PREFIX;
         bool spatial = level != QWEN_VAE_LEVELS - 1;
-        PixTensor shortcut = tensor_resample_shortcut(hidden,width,height,size_t(vae.tensor(prefix + "0" QWEN_VAE_CONV1 WEIGHT_SUFFIX).shape.back()),level && spatial? 2 : 1,false,spatial);
+        PixTensor shortcut = tensor_resample_shortcut(hidden,width,height,size_t(vae.tensor(prefix + QWEN_VAE_FIRST_BLOCK QWEN_VAE_CONV1 WEIGHT_SUFFIX).shape.back()),level && spatial? 2 : 1,false,spatial);
         for (size_t block = 0; block < QWEN_VAE_BLOCKS; block++) hidden = qwen_vae_block(vae,prefix + std::to_string(block),hidden,width,height);
         if (spatial) {
             PixConv2D geometry;
@@ -156,7 +156,7 @@ PixImage qwen_vae_decode(const PixModelFile &vae, PixTensor latents, size_t widt
         std::string prefix = QWEN_VAE_DECODER QWEN_VAE_UP_LEVEL_PREFIX + std::to_string(level) + QWEN_VAE_UP_BLOCK_PREFIX;
         bool spatial = level != QWEN_VAE_LEVELS - 1;
         PixTensor shortcut;
-        if (spatial) shortcut = tensor_resample_shortcut(hidden,width,height,size_t(vae.tensor(prefix + "0" QWEN_VAE_CONV1 WEIGHT_SUFFIX).shape.back()),level < QWEN_VAE_LEVELS - 2? 2 : 1,true,true);
+        if (spatial) shortcut = tensor_resample_shortcut(hidden,width,height,size_t(vae.tensor(prefix + QWEN_VAE_FIRST_BLOCK QWEN_VAE_CONV1 WEIGHT_SUFFIX).shape.back()),level < QWEN_VAE_LEVELS - 2? 2 : 1,true,true);
         for (size_t block = 0; block < QWEN_VAE_UP_BLOCKS; block++) hidden = qwen_vae_block(vae,prefix + std::to_string(block),hidden,width,height);
         if (spatial) {
             hidden = tensor_upsample(hidden,width,height);

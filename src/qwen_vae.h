@@ -9,20 +9,6 @@
 
 #include "inference.h"
 
-#define QWEN_VAE_INPUT_CONV "conv1"
-#define QWEN_VAE_POST_QUANT_CONV "conv2"
-#define QWEN_VAE_MIDDLE_FIRST "middle.0"
-#define QWEN_VAE_MIDDLE_SECOND "middle.2"
-#define QWEN_VAE_MIDDLE_NORM "middle.1.norm.gamma"
-#define QWEN_VAE_MIDDLE_QKV "middle.1.to_qkv"
-#define QWEN_VAE_MIDDLE_PROJECTION "middle.1.proj"
-#define QWEN_VAE_UP_LEVEL_PREFIX "upsamples."
-#define QWEN_VAE_DOWN_LEVEL_PREFIX "downsamples."
-#define QWEN_VAE_UP_BLOCK_PREFIX ".upsamples."
-#define QWEN_VAE_DOWN_BLOCK_PREFIX ".downsamples."
-#define QWEN_VAE_HEAD_NORM "head.0.gamma"
-#define QWEN_VAE_HEAD_CONV "head.2"
-
 #define QWEN_VAE_CHANNELS 64
 #define QWEN_VAE_RGBA 4
 #define QWEN_VAE_FACTOR 16
@@ -40,15 +26,6 @@
 #define QWEN_VAE_ENCODE_SPAN 0.10f
 #define QWEN_VAE_DECODE_BEGIN 0.90f
 #define QWEN_VAE_DECODE_SPAN 0.10f
-#define QWEN_VAE_ENCODER "encoder."
-#define QWEN_VAE_DECODER "decoder."
-#define QWEN_VAE_NORM1 ".residual.0.gamma"
-#define QWEN_VAE_CONV1 ".residual.2"
-#define QWEN_VAE_NORM2 ".residual.3.gamma"
-#define QWEN_VAE_CONV2 ".residual.6"
-#define QWEN_VAE_SHORTCUT ".shortcut"
-#define QWEN_VAE_RESAMPLE ".resample.1"
-#define QWEN_VAE_TIME_CONV ".time_conv"
 
 static const float qwen_vae_mean[QWEN_VAE_CHANNELS] = {
     0.5126f,0.7721f,-0.0631f,1.3506f,-0.7855f,-2.1025f,-0.3458f,1.3722f,1.8873f,-1.7177f,-0.651f,0.2732f,0.7562f,-0.6163f,-1.0277f,3.8363f,2.021f,0.0472f,0.932f,2.0087f,2.4954f,-0.1391f,-1.4249f,1.8464f,-0.5236f,1.2826f,3.7046f,-1.3035f,2.7286f,-1.4518f,-1.9036f,-1.9955f,-0.0342f,-1.0265f,-0.7636f,3.0555f,0.0746f,-3.0751f,-0.1076f,1.7376f,-1.0914f,-1.9435f,-0.2784f,-1.368f,0.4809f,-0.4433f,0.3764f,0.5729f,-2.0595f,1.096f,-1.326f,-2.0211f,-5.0179f,0.5275f,4.0162f,1.8505f,0.3026f,1.9373f,1.4937f,0.2632f,0.5547f,-1.7121f,-0.1562f,0.0304f

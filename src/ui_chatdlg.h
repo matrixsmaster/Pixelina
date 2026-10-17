@@ -13,7 +13,6 @@
 #include "pixuilib.h"
 #include "qwen_chat.h"
 
-#define UI_STOP_TEXT "Stop"
 #define UI_STOPPING_TEXT "Stopping..."
 #define UI_CHAT_TITLE "Chat with "
 #define UI_CHAT_SEND "Send"

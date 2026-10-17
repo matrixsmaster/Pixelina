@@ -20,6 +20,9 @@ PixelinaReferenceDialog::PixelinaReferenceDialog(PixUICanvas &context, const std
     carousel->caption = [](size_t index) {
         return QWEN_VL_REFERENCE_PREFIX + std::to_string(index + 1) + ">";
     };
+    carousel->search_name = [this](size_t index) {
+        return references[index].substr(references[index].find_last_of('/') + 1);
+    };
     carousel->load = [this](size_t index) {
         return load? load(references[index]) : PixUIThumbCache{};
     };
@@ -36,6 +39,14 @@ PixelinaReferenceDialog::PixelinaReferenceDialog(PixUICanvas &context, const std
     prompt = add<PixUIMemo>();
     prompt->set_text(text);
     register_focus(*prompt);
+    carousel->double_clicked = [this](size_t index) {
+        focus_control(*prompt);
+        PixUIEvent insertion;
+        insertion.type = PIXUI_TEXT;
+        insertion.text = carousel->caption(index);
+        prompt->event(insertion);
+        prompt->repaint = true;
+    };
     hint = add<PixUILabel>(UI_REFERENCE_HINT);
     add_button = add<PixUIButton>("Add Image");
     add_button->activate = [this]() {

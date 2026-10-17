@@ -25,8 +25,6 @@
 #define QWEN_CHAT_THINK "<think>"
 #define QWEN_CHAT_THINK_END "</think>"
 #define QWEN_CHAT_MESSAGE_END "<|im_end|>\n"
-#define QWEN_CHAT_OUTPUT "output"
-#define QWEN_CHAT_OUTPUT_NORM "output_norm.weight"
 #define QWEN_CHAT_MEMORY_MAPS 4
 #define QWEN_CHAT_VISION_MAPS 8
 #define QWEN_CHAT_FFN_MAPS 3

@@ -9,7 +9,7 @@
 
 #include "os.h"
 #include <algorithm>
-#include <cstdint>
+#include <stdint.h>
 #include <functional>
 #include <memory>
 #include <map>
@@ -62,6 +62,7 @@
 #define UI_CLOSE_TEXT "Close"
 #define UI_CANCEL_TEXT "Cancel"
 #define UI_OK_TEXT "OK"
+#define UI_STOP_TEXT "Stop"
 #define UI_DIRECTORY_ERROR "Cannot open directory: "
 #define UI_SAVE_TEXT "Save"
 #define UI_SAVE_AS_TEXT "Save as"
@@ -80,6 +81,8 @@
 #define UI_MENU_HEIGHT (UI_FONT_HEIGHT + UI_MENU_PADDING * 2)
 #define UI_WINDOW_TITLE_HEIGHT UI_TITLE_HEIGHT
 #define UI_FRAME 4
+#define UI_WINDOW_RESIZE_SIZE UI_STATUS_HEIGHT
+#define UI_RESIZE_GRIP_SPACING 4
 #define UI_DIRECTORY_ROWS 12
 #define UI_DIALOG_BROWSE_COLUMNS 12
 #define UI_DIALOG_BUTTON_COLUMNS 10
@@ -105,7 +108,8 @@
 #define UI_STATUS_PROGRESS_OFFSET 170
 #define UI_STATUS_COUNT_WIDTH 104
 #define UI_STATUS_TIME_WIDTH 160
-#define UI_STATUS_PROGRESS_TOP 5
+#define UI_STATUS_HEIGHT (UI_FONT_HEIGHT + UI_TEXT_PADDING * 2 + UI_BORDER_WIDTH * 4)
+#define UI_STATUS_PROGRESS_TOP (UI_BORDER_WIDTH * 2)
 #define PIXUI_STRETCH_X 1
 #define PIXUI_STRETCH_Y 2
 #define PIXUI_ALIGN_RIGHT 4
@@ -174,7 +178,7 @@ enum PixUIEventType {
 enum PixUIKey {
     PIXUI_RETURN = PIXUI_SPECIAL_KEY,PIXUI_ESCAPE,PIXUI_TAB,PIXUI_BACKSPACE,PIXUI_DELETE,
     PIXUI_LEFT,PIXUI_RIGHT,PIXUI_HOME,PIXUI_END,PIXUI_UP_KEY,PIXUI_DOWN_KEY,
-    PIXUI_F3,PIXUI_F4,PIXUI_F5,PIXUI_F2,PIXUI_F11
+    PIXUI_F3,PIXUI_F4,PIXUI_F5,PIXUI_F2,PIXUI_F11,PIXUI_F6
 };
 
 struct PixUIEvent {
@@ -250,7 +254,7 @@ public:
     virtual void window_title(const std::string &title) = 0;
     void bevel(const PixUIRect &rect, bool inset, bool fill = true);
     void text(int x, int y, const std::string &value, unsigned color, PixUIFontRole role = PIXUI_FONT_LABEL);
-    void button(const PixUIRect &rect, const std::string &label, bool pressed);
+    void button(const PixUIRect &rect, const std::string &label, bool pressed, bool enabled = true);
     bool event(PixUIForm &form, const PixUIEvent &input);
     void release_capture();
 
@@ -667,21 +671,27 @@ public:
     int cell_width = UI_CAROUSEL_CELL; // preview slot width
     size_t cache_limit = UI_CACHE_LIMIT; // maximum resident thumbnail resources
     std::function<std::string(size_t)> caption; // backing record caption provider
+    std::function<std::string(size_t)> search_name; // optional filename provider when captions use reference tags
     std::function<PixUIThumbCache(size_t)> load; // backend creates an opaque thumbnail
     std::function<void(void*)> release; // backend destroys an opaque thumbnail
     std::function<bool(size_t)> selected; // application accepts the activated record
+    std::function<void(size_t)> double_clicked; // action after a second click on the same item
 
 private:
     size_t count = 0,first = 0,last = 0; // record count and visible interval
     int selection = -1,offset = 0; // owned selection and horizontal scroll position
     bool invalid = true; // backing records changed
     uint64_t clock = 0; // thumbnail access sequence for LRU eviction
+    std::string search_prefix; // case-folded letters typed since the last item click or backing change
+    uint64_t item_click_time = 0; // time of the previous item click
+    int clicked_item = -1; // previous clicked record, or no pending double click
     std::vector<PixUIThumb*> thumbnails; // borrowed visible children owned by previews
     PixUILabel* empty = nullptr; // borrowed empty-state label owned by previews
     PixUIForm* previews; // clipped visible thumbnails
     PixUIScrollbar* scrollbar; // owned carousel scrollbar
     std::map<size_t,PixUIThumbCache> cache; // bounded owned backend resources
 
+    void click(size_t index);
     PixUIThumbCache &thumbnail(size_t index);
     void trim_cache(size_t limit);
 };
@@ -713,7 +723,7 @@ public:
     int progress_width = UI_STATUS_PROGRESS_WIDTH,progress_offset = UI_STATUS_PROGRESS_OFFSET,progress_top = UI_STATUS_PROGRESS_TOP; // configured original geometry
 
 private:
-    std::string count_text,timing_text; // image count and elapsed time or ETA panels
+    std::string count_text,timing_text; // image count and elapsed time panels
     PixUIForm* text_clip; // owned clipped status label container
     PixUIForm* count_clip; // owned clipped image count panel
     PixUIForm* timing_clip; // owned clipped timing panel

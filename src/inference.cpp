@@ -19,65 +19,65 @@ static bool validate_encoder(const PixModelFile &model)
 {
     auto architecture = model.metadata.find("general.architecture");
     if (architecture == model.metadata.end() || architecture->second.scalar != "qwen3") return false;
-    if (!require_weight(model,"token_embd.weight",{QWEN_HIDDEN,QWEN_VOCABULARY})) return false;
-    if (!require_weight(model,"output_norm.weight",{QWEN_HIDDEN})) return false;
+    if (!require_weight(model,QWEN_VL_EMBEDDING_WEIGHT,{QWEN_HIDDEN,QWEN_VOCABULARY})) return false;
+    if (!require_weight(model,QWEN_CHAT_OUTPUT_NORM,{QWEN_HIDDEN})) return false;
     for (unsigned layer = 0; layer < QWEN_LAYERS; layer++) {
-        std::string prefix = "blk." + std::to_string(layer) + ".";
-        if (!require_weight(model,prefix + "attn_norm.weight",{QWEN_HIDDEN})) return false;
-        if (!require_weight(model,prefix + "ffn_norm.weight",{QWEN_HIDDEN})) return false;
-        if (!require_weight(model,prefix + "attn_q.weight",{QWEN_HIDDEN,QWEN_HEADS * QWEN_HEAD_DIM})) return false;
-        if (!require_weight(model,prefix + "attn_k.weight",{QWEN_HIDDEN,QWEN_KV_HEADS * QWEN_HEAD_DIM})) return false;
-        if (!require_weight(model,prefix + "attn_v.weight",{QWEN_HIDDEN,QWEN_KV_HEADS * QWEN_HEAD_DIM})) return false;
-        if (!require_weight(model,prefix + "attn_output.weight",{QWEN_HEADS * QWEN_HEAD_DIM,QWEN_HIDDEN})) return false;
-        if (!require_weight(model,prefix + "attn_q_norm.weight",{QWEN_HEAD_DIM})) return false;
-        if (!require_weight(model,prefix + "attn_k_norm.weight",{QWEN_HEAD_DIM})) return false;
-        if (!require_weight(model,prefix + "ffn_gate.weight",{QWEN_HIDDEN,QWEN_INTERMEDIATE})) return false;
-        if (!require_weight(model,prefix + "ffn_up.weight",{QWEN_HIDDEN,QWEN_INTERMEDIATE})) return false;
-        if (!require_weight(model,prefix + "ffn_down.weight",{QWEN_INTERMEDIATE,QWEN_HIDDEN})) return false;
+        std::string prefix = QWEN_VL_BLOCK_PREFIX + std::to_string(layer) + TENSOR_NAME_SEPARATOR;
+        if (!require_weight(model,prefix + QWEN_VL_ATTENTION_NORM,{QWEN_HIDDEN})) return false;
+        if (!require_weight(model,prefix + QWEN_VL_FFN_NORM,{QWEN_HIDDEN})) return false;
+        if (!require_weight(model,prefix + QWEN_VL_QUERY WEIGHT_SUFFIX,{QWEN_HIDDEN,QWEN_HEADS * QWEN_HEAD_DIM})) return false;
+        if (!require_weight(model,prefix + QWEN_VL_KEY WEIGHT_SUFFIX,{QWEN_HIDDEN,QWEN_KV_HEADS * QWEN_HEAD_DIM})) return false;
+        if (!require_weight(model,prefix + QWEN_VL_VALUE WEIGHT_SUFFIX,{QWEN_HIDDEN,QWEN_KV_HEADS * QWEN_HEAD_DIM})) return false;
+        if (!require_weight(model,prefix + QWEN_VL_ATTENTION_OUTPUT WEIGHT_SUFFIX,{QWEN_HEADS * QWEN_HEAD_DIM,QWEN_HIDDEN})) return false;
+        if (!require_weight(model,prefix + QWEN_VL_QUERY_NORM,{QWEN_HEAD_DIM})) return false;
+        if (!require_weight(model,prefix + QWEN_VL_KEY_NORM,{QWEN_HEAD_DIM})) return false;
+        if (!require_weight(model,prefix + QWEN_VL_FFN_GATE WEIGHT_SUFFIX,{QWEN_HIDDEN,QWEN_INTERMEDIATE})) return false;
+        if (!require_weight(model,prefix + QWEN_VL_FFN_UP WEIGHT_SUFFIX,{QWEN_HIDDEN,QWEN_INTERMEDIATE})) return false;
+        if (!require_weight(model,prefix + QWEN_VL_FFN_DOWN WEIGHT_SUFFIX,{QWEN_INTERMEDIATE,QWEN_HIDDEN})) return false;
     }
     return true;
 }
 
 static bool validate_z_block(const PixModelFile &model, const std::string &prefix, bool modulation)
 {
-    if (!require_weight(model,prefix + "attention.qkv.weight",{Z_HIDDEN,Z_HIDDEN * 3})) return false;
-    if (!require_weight(model,prefix + "attention.out.weight",{Z_HIDDEN,Z_HIDDEN})) return false;
-    if (!require_weight(model,prefix + "attention.q_norm.weight",{Z_HEAD_DIM})) return false;
-    if (!require_weight(model,prefix + "attention.k_norm.weight",{Z_HEAD_DIM})) return false;
-    const char* norms[] = {"attention_norm1","attention_norm2","ffn_norm1","ffn_norm2"};
+    if (!require_weight(model,prefix + Z_ATTENTION_QKV WEIGHT_SUFFIX,{Z_HIDDEN,Z_HIDDEN * 3})) return false;
+    if (!require_weight(model,prefix + Z_ATTENTION_OUTPUT WEIGHT_SUFFIX,{Z_HIDDEN,Z_HIDDEN})) return false;
+    if (!require_weight(model,prefix + Z_QUERY_NORM,{Z_HEAD_DIM})) return false;
+    if (!require_weight(model,prefix + Z_KEY_NORM,{Z_HEAD_DIM})) return false;
+    const char* norms[] = {Z_ATTENTION_NORM1,Z_ATTENTION_NORM2,Z_FFN_NORM1,Z_FFN_NORM2};
     for (const char* norm : norms) if (!require_weight(model,prefix + norm + WEIGHT_SUFFIX,{Z_HIDDEN})) return false;
-    if (!require_weight(model,prefix + "feed_forward.w1.weight",{Z_HIDDEN,Z_INTERMEDIATE})) return false;
-    if (!require_weight(model,prefix + "feed_forward.w3.weight",{Z_HIDDEN,Z_INTERMEDIATE})) return false;
-    if (!require_weight(model,prefix + "feed_forward.w2.weight",{Z_INTERMEDIATE,Z_HIDDEN})) return false;
+    if (!require_weight(model,prefix + Z_FFN_GATE WEIGHT_SUFFIX,{Z_HIDDEN,Z_INTERMEDIATE})) return false;
+    if (!require_weight(model,prefix + Z_FFN_UP WEIGHT_SUFFIX,{Z_HIDDEN,Z_INTERMEDIATE})) return false;
+    if (!require_weight(model,prefix + Z_FFN_DOWN WEIGHT_SUFFIX,{Z_INTERMEDIATE,Z_HIDDEN})) return false;
     if (modulation) {
-        if (!require_weight(model,prefix + "adaLN_modulation.0.weight",{Z_TIME_DIM,Z_HIDDEN * 4})) return false;
-        if (!require_weight(model,prefix + "adaLN_modulation.0.bias",{Z_HIDDEN * 4})) return false;
+        if (!require_weight(model,prefix + Z_MODULATION WEIGHT_SUFFIX,{Z_TIME_DIM,Z_HIDDEN * 4})) return false;
+        if (!require_weight(model,prefix + Z_MODULATION BIAS_SUFFIX,{Z_HIDDEN * 4})) return false;
     }
     return true;
 }
 
 static bool validate_diffuser(const PixModelFile &model)
 {
-    if (!require_weight(model,"cap_embedder.0.weight",{QWEN_HIDDEN})) return false;
-    if (!require_weight(model,"cap_embedder.1.weight",{QWEN_HIDDEN,Z_HIDDEN})) return false;
-    if (!require_weight(model,"cap_embedder.1.bias",{Z_HIDDEN})) return false;
-    if (!require_weight(model,"cap_pad_token",{Z_HIDDEN,1})) return false;
-    if (!require_weight(model,"x_pad_token",{Z_HIDDEN,1})) return false;
-    if (!require_weight(model,"x_embedder.weight",{Z_PATCH_SIZE * Z_PATCH_SIZE * Z_LATENT_CHANNELS,Z_HIDDEN})) return false;
-    if (!require_weight(model,"x_embedder.bias",{Z_HIDDEN})) return false;
-    if (!require_weight(model,"t_embedder.mlp.0.weight",{Z_TIME_DIM,Z_TIME_HIDDEN})) return false;
-    if (!require_weight(model,"t_embedder.mlp.0.bias",{Z_TIME_HIDDEN})) return false;
-    if (!require_weight(model,"t_embedder.mlp.2.weight",{Z_TIME_HIDDEN,Z_TIME_DIM})) return false;
-    if (!require_weight(model,"t_embedder.mlp.2.bias",{Z_TIME_DIM})) return false;
-    if (!require_weight(model,"final_layer.linear.weight",{Z_HIDDEN,Z_PATCH_SIZE * Z_PATCH_SIZE * Z_LATENT_CHANNELS})) return false;
-    if (!require_weight(model,"final_layer.linear.bias",{Z_PATCH_SIZE * Z_PATCH_SIZE * Z_LATENT_CHANNELS})) return false;
-    if (!require_weight(model,"final_layer.adaLN_modulation.1.weight",{Z_TIME_DIM,Z_HIDDEN})) return false;
-    if (!require_weight(model,"final_layer.adaLN_modulation.1.bias",{Z_HIDDEN})) return false;
+    if (!require_weight(model,Z_CAPTION_NORM,{QWEN_HIDDEN})) return false;
+    if (!require_weight(model,Z_CAPTION_PROJECTION WEIGHT_SUFFIX,{QWEN_HIDDEN,Z_HIDDEN})) return false;
+    if (!require_weight(model,Z_CAPTION_PROJECTION BIAS_SUFFIX,{Z_HIDDEN})) return false;
+    if (!require_weight(model,Z_CAPTION_PAD,{Z_HIDDEN,1})) return false;
+    if (!require_weight(model,Z_IMAGE_PAD,{Z_HIDDEN,1})) return false;
+    if (!require_weight(model,Z_IMAGE_PROJECTION WEIGHT_SUFFIX,{Z_PATCH_SIZE * Z_PATCH_SIZE * Z_LATENT_CHANNELS,Z_HIDDEN})) return false;
+    if (!require_weight(model,Z_IMAGE_PROJECTION BIAS_SUFFIX,{Z_HIDDEN})) return false;
+    if (!require_weight(model,Z_TIME_FIRST WEIGHT_SUFFIX,{Z_TIME_DIM,Z_TIME_HIDDEN})) return false;
+    if (!require_weight(model,Z_TIME_FIRST BIAS_SUFFIX,{Z_TIME_HIDDEN})) return false;
+    if (!require_weight(model,Z_TIME_SECOND WEIGHT_SUFFIX,{Z_TIME_HIDDEN,Z_TIME_DIM})) return false;
+    if (!require_weight(model,Z_TIME_SECOND BIAS_SUFFIX,{Z_TIME_DIM})) return false;
+    if (!require_weight(model,Z_OUTPUT_PROJECTION WEIGHT_SUFFIX,{Z_HIDDEN,Z_PATCH_SIZE * Z_PATCH_SIZE * Z_LATENT_CHANNELS})) return false;
+    if (!require_weight(model,Z_OUTPUT_PROJECTION BIAS_SUFFIX,{Z_PATCH_SIZE * Z_PATCH_SIZE * Z_LATENT_CHANNELS})) return false;
+    if (!require_weight(model,Z_OUTPUT_MODULATION WEIGHT_SUFFIX,{Z_TIME_DIM,Z_HIDDEN})) return false;
+    if (!require_weight(model,Z_OUTPUT_MODULATION BIAS_SUFFIX,{Z_HIDDEN})) return false;
     for (unsigned layer = 0; layer < Z_REFINERS; layer++) {
-        if (!validate_z_block(model,"context_refiner." + std::to_string(layer) + ".",false)) return false;
-        if (!validate_z_block(model,"noise_refiner." + std::to_string(layer) + ".",true)) return false;
+        if (!validate_z_block(model,Z_CONTEXT_REFINER_PREFIX + std::to_string(layer) + TENSOR_NAME_SEPARATOR,false)) return false;
+        if (!validate_z_block(model,Z_NOISE_REFINER_PREFIX + std::to_string(layer) + TENSOR_NAME_SEPARATOR,true)) return false;
     }
-    for (unsigned layer = 0; layer < Z_LAYERS; layer++) if (!validate_z_block(model,"layers." + std::to_string(layer) + ".",true)) return false;
+    for (unsigned layer = 0; layer < Z_LAYERS; layer++) if (!validate_z_block(model,Z_BLOCK_PREFIX + std::to_string(layer) + TENSOR_NAME_SEPARATOR,true)) return false;
     return true;
 }
 
@@ -90,13 +90,13 @@ static bool validate_conv(const PixModelFile &model, const std::string &name, si
 
 static bool validate_vae_block(const PixModelFile &model, const std::string &name, size_t input, size_t output)
 {
-    if (!require_weight(model,name + ".norm1.weight",{input})) return false;
-    if (!require_weight(model,name + ".norm1.bias",{input})) return false;
-    if (!require_weight(model,name + ".norm2.weight",{output})) return false;
-    if (!require_weight(model,name + ".norm2.bias",{output})) return false;
-    if (!validate_conv(model,name + ".conv1",input,output,3)) return false;
-    if (!validate_conv(model,name + ".conv2",output,output,3)) return false;
-    if (input != output && !validate_conv(model,name + ".nin_shortcut",input,output,1)) return false;
+    if (!require_weight(model,name + VAE_NORM1_SUFFIX WEIGHT_SUFFIX,{input})) return false;
+    if (!require_weight(model,name + VAE_NORM1_SUFFIX BIAS_SUFFIX,{input})) return false;
+    if (!require_weight(model,name + VAE_NORM2_SUFFIX WEIGHT_SUFFIX,{output})) return false;
+    if (!require_weight(model,name + VAE_NORM2_SUFFIX BIAS_SUFFIX,{output})) return false;
+    if (!validate_conv(model,name + VAE_CONV1_SUFFIX,input,output,3)) return false;
+    if (!validate_conv(model,name + VAE_CONV2_SUFFIX,output,output,3)) return false;
+    if (input != output && !validate_conv(model,name + VAE_SHORTCUT_SUFFIX,input,output,1)) return false;
     return true;
 }
 
@@ -104,24 +104,24 @@ static bool validate_vae(const PixModelFile &model)
 {
     static const size_t channels[] = {128,256,512,512};
     size_t current = channels[Z_VAE_LEVELS - 1];
-    if (!validate_conv(model,"decoder.conv_in",Z_LATENT_CHANNELS,current,3)) return false;
-    if (!validate_vae_block(model,"decoder.mid.block_1",current,current)) return false;
-    if (!validate_vae_block(model,"decoder.mid.block_2",current,current)) return false;
-    if (!require_weight(model,"decoder.mid.attn_1.norm.weight",{current})) return false;
-    if (!require_weight(model,"decoder.mid.attn_1.norm.bias",{current})) return false;
-    const char* projections[] = {".q",".k",".v",".proj_out"};
+    if (!validate_conv(model,VAE_INPUT_CONV,Z_LATENT_CHANNELS,current,3)) return false;
+    if (!validate_vae_block(model,VAE_MID_BLOCK_FIRST,current,current)) return false;
+    if (!validate_vae_block(model,VAE_MID_BLOCK_SECOND,current,current)) return false;
+    if (!require_weight(model,VAE_ATTENTION_PREFIX VAE_NORM_SUFFIX WEIGHT_SUFFIX,{current})) return false;
+    if (!require_weight(model,VAE_ATTENTION_PREFIX VAE_NORM_SUFFIX BIAS_SUFFIX,{current})) return false;
+    const char* projections[] = {VAE_QUERY_SUFFIX,VAE_KEY_SUFFIX,VAE_VALUE_SUFFIX,VAE_PROJECTION_SUFFIX};
     for (const char* projection : projections) if (!validate_conv(model,std::string(VAE_ATTENTION_PREFIX) + projection,current,current,1)) return false;
     for (int level = Z_VAE_LEVELS - 1; level >= 0; level--) {
         for (int block = 0; block < Z_VAE_BLOCKS; block++) {
-            std::string name = std::string(VAE_UP_PREFIX) + std::to_string(level) + ".block." + std::to_string(block);
+            std::string name = std::string(VAE_UP_PREFIX) + std::to_string(level) + VAE_BLOCK_PREFIX + std::to_string(block);
             if (!validate_vae_block(model,name,current,channels[level])) return false;
             current = channels[level];
         }
-        if (level && !validate_conv(model,std::string(VAE_UP_PREFIX) + std::to_string(level) + ".upsample.conv",current,current,3)) return false;
+        if (level && !validate_conv(model,std::string(VAE_UP_PREFIX) + std::to_string(level) + VAE_UPSAMPLE_SUFFIX,current,current,3)) return false;
     }
-    if (!require_weight(model,"decoder.norm_out.weight",{current})) return false;
-    if (!require_weight(model,"decoder.norm_out.bias",{current})) return false;
-    if (!validate_conv(model,"decoder.conv_out",current,Z_RGB_CHANNELS,3)) return false;
+    if (!require_weight(model,VAE_OUTPUT_NORM WEIGHT_SUFFIX,{current})) return false;
+    if (!require_weight(model,VAE_OUTPUT_NORM BIAS_SUFFIX,{current})) return false;
+    if (!validate_conv(model,VAE_OUTPUT_CONV,current,Z_RGB_CHANNELS,3)) return false;
     return true;
 }
 
@@ -170,7 +170,7 @@ PixTensor inference_encode(const PixModelFile &encoder, const std::string &promp
     if (!tokenizer.load(encoder)) return {};
     std::vector<int> ids = tokenizer.encode(prompt);
     if (ids.empty()) return {};
-    const PixWeight &embedding = encoder.tensor("token_embd.weight");
+    const PixWeight &embedding = encoder.tensor(QWEN_VL_EMBEDDING_WEIGHT);
     uint64_t stride = weight_bytes({QWEN_HIDDEN},embedding.type);
     PixTensor hidden(ids.size(),QWEN_HIDDEN);
     for (size_t i = 0; i < ids.size(); i++) {
@@ -195,27 +195,27 @@ PixTensor inference_encode(const PixModelFile &encoder, const std::string &promp
     }
     // hidden_states[-2] is the output of block 34, before the last block and final RMSNorm.
     for (unsigned layer = 0; layer < QWEN_LAYERS - 1; layer++) {
-        std::string prefix = "blk." + std::to_string(layer) + ".";
-        PixTensor normalized = tensor_norm(hidden,tensor_vector(encoder,prefix + "attn_norm.weight"),COMPUTE_NORM_EPSILON);
-        PixTensor q = tensor_linear(encoder,prefix + "attn_q",normalized,false);
-        PixTensor k = tensor_linear(encoder,prefix + "attn_k",normalized,false);
-        PixTensor v = tensor_linear(encoder,prefix + "attn_v",normalized,false);
-        q = head_norm(std::move(q),tensor_vector(encoder,prefix + "attn_q_norm.weight"),QWEN_HEAD_DIM,COMPUTE_NORM_EPSILON);
-        k = head_norm(std::move(k),tensor_vector(encoder,prefix + "attn_k_norm.weight"),QWEN_HEAD_DIM,COMPUTE_NORM_EPSILON);
+        std::string prefix = QWEN_VL_BLOCK_PREFIX + std::to_string(layer) + TENSOR_NAME_SEPARATOR;
+        PixTensor normalized = tensor_norm(hidden,tensor_vector(encoder,prefix + QWEN_VL_ATTENTION_NORM),COMPUTE_NORM_EPSILON);
+        PixTensor q = tensor_linear(encoder,prefix + QWEN_VL_QUERY,normalized,false);
+        PixTensor k = tensor_linear(encoder,prefix + QWEN_VL_KEY,normalized,false);
+        PixTensor v = tensor_linear(encoder,prefix + QWEN_VL_VALUE,normalized,false);
+        q = head_norm(std::move(q),tensor_vector(encoder,prefix + QWEN_VL_QUERY_NORM),QWEN_HEAD_DIM,COMPUTE_NORM_EPSILON);
+        k = head_norm(std::move(k),tensor_vector(encoder,prefix + QWEN_VL_KEY_NORM),QWEN_HEAD_DIM,COMPUTE_NORM_EPSILON);
         tensor_rope(q,QWEN_HEADS,angles.cosine,angles.sine,false);
         tensor_rope(k,QWEN_KV_HEADS,angles.cosine,angles.sine,false);
         PixTensor attended = tensor_attention(q,k,v,QWEN_HEADS,QWEN_KV_HEADS,true);
-        tensor_add(hidden,tensor_linear(encoder,prefix + "attn_output",attended,false));
+        tensor_add(hidden,tensor_linear(encoder,prefix + QWEN_VL_ATTENTION_OUTPUT,attended,false));
         q = PixTensor();
         k = PixTensor();
         v = PixTensor();
         attended = PixTensor();
-        normalized = tensor_norm(hidden,tensor_vector(encoder,prefix + "ffn_norm.weight"),COMPUTE_NORM_EPSILON);
-        PixTensor gate = tensor_linear(encoder,prefix + "ffn_gate",normalized,false);
-        PixTensor up = tensor_linear(encoder,prefix + "ffn_up",normalized,false);
+        normalized = tensor_norm(hidden,tensor_vector(encoder,prefix + QWEN_VL_FFN_NORM),COMPUTE_NORM_EPSILON);
+        PixTensor gate = tensor_linear(encoder,prefix + QWEN_VL_FFN_GATE,normalized,false);
+        PixTensor up = tensor_linear(encoder,prefix + QWEN_VL_FFN_UP,normalized,false);
         tensor_silu(gate);
         tensor_gate(gate,up);
-        tensor_add(hidden,tensor_linear(encoder,prefix + "ffn_down",gate,false));
+        tensor_add(hidden,tensor_linear(encoder,prefix + QWEN_VL_FFN_DOWN,gate,false));
         if (hidden.values.empty()) return {};
 #ifdef PIXELINA_WITH_VULKAN
         if (!vulkan_active_state())
@@ -293,10 +293,10 @@ static void z_residual(PixTensor &input, const PixTensor &output, const PixTenso
 static PixTensor z_block(const PixModelFile &model, const std::string &name, PixTensor input, const PixRotary &angles, const PixTensor* timestep)
 {
     PixTensor modulation;
-    if (timestep) modulation = tensor_linear(model,name + "adaLN_modulation.0",*timestep,true);
-    PixTensor normalized = tensor_norm(input,tensor_vector(model,name + "attention_norm1.weight"),COMPUTE_Z_NORM_EPSILON);
+    if (timestep) modulation = tensor_linear(model,name + Z_MODULATION,*timestep,true);
+    PixTensor normalized = tensor_norm(input,tensor_vector(model,name + Z_ATTENTION_NORM1 WEIGHT_SUFFIX),COMPUTE_Z_NORM_EPSILON);
     if (timestep) normalized = z_modulate(normalized,modulation,0);
-    PixTensor qkv = tensor_linear(model,name + "attention.qkv",normalized,false);
+    PixTensor qkv = tensor_linear(model,name + Z_ATTENTION_QKV,normalized,false);
     if (qkv.values.empty()) return {};
     PixTensor q(input.rows,Z_HIDDEN),k(input.rows,Z_HIDDEN),v(input.rows,Z_HIDDEN);
 #ifdef PIXELINA_WITH_VULKAN
@@ -312,13 +312,13 @@ static PixTensor z_block(const PixModelFile &model, const std::string &name, Pix
         std::copy_n(qkv.values.data() + row * qkv.channels + Z_HIDDEN * 2,Z_HIDDEN,v.values.data() + row * Z_HIDDEN);
     }
     qkv = PixTensor();
-    q = head_norm(std::move(q),tensor_vector(model,name + "attention.q_norm.weight"),Z_HEAD_DIM,COMPUTE_Z_NORM_EPSILON);
-    k = head_norm(std::move(k),tensor_vector(model,name + "attention.k_norm.weight"),Z_HEAD_DIM,COMPUTE_Z_NORM_EPSILON);
+    q = head_norm(std::move(q),tensor_vector(model,name + Z_QUERY_NORM),Z_HEAD_DIM,COMPUTE_Z_NORM_EPSILON);
+    k = head_norm(std::move(k),tensor_vector(model,name + Z_KEY_NORM),Z_HEAD_DIM,COMPUTE_Z_NORM_EPSILON);
     tensor_rope(q,Z_HEADS,angles.cosine,angles.sine,true);
     tensor_rope(k,Z_HEADS,angles.cosine,angles.sine,true);
     PixTensor attended = tensor_attention(q,k,v,Z_HEADS,Z_HEADS,false);
-    PixTensor projected = tensor_linear(model,name + "attention.out",attended,false);
-    PixTensor residual = tensor_norm(projected,tensor_vector(model,name + "attention_norm2.weight"),COMPUTE_Z_NORM_EPSILON);
+    PixTensor projected = tensor_linear(model,name + Z_ATTENTION_OUTPUT,attended,false);
+    PixTensor residual = tensor_norm(projected,tensor_vector(model,name + Z_ATTENTION_NORM2 WEIGHT_SUFFIX),COMPUTE_Z_NORM_EPSILON);
     q = PixTensor();
     k = PixTensor();
     v = PixTensor();
@@ -326,16 +326,16 @@ static PixTensor z_block(const PixModelFile &model, const std::string &name, Pix
     projected = PixTensor();
     z_residual(input,residual,timestep? &modulation : nullptr,1);
     residual = PixTensor();
-    normalized = tensor_norm(input,tensor_vector(model,name + "ffn_norm1.weight"),COMPUTE_Z_NORM_EPSILON);
+    normalized = tensor_norm(input,tensor_vector(model,name + Z_FFN_NORM1 WEIGHT_SUFFIX),COMPUTE_Z_NORM_EPSILON);
     if (timestep) normalized = z_modulate(normalized,modulation,2);
-    PixTensor gate = tensor_linear(model,name + "feed_forward.w1",normalized,false);
-    PixTensor up = tensor_linear(model,name + "feed_forward.w3",normalized,false);
+    PixTensor gate = tensor_linear(model,name + Z_FFN_GATE,normalized,false);
+    PixTensor up = tensor_linear(model,name + Z_FFN_UP,normalized,false);
     tensor_silu(gate);
     tensor_gate(gate,up);
     up = PixTensor();
     normalized = PixTensor();
-    projected = tensor_linear(model,name + "feed_forward.w2",gate,false);
-    residual = tensor_norm(projected,tensor_vector(model,name + "ffn_norm2.weight"),COMPUTE_Z_NORM_EPSILON);
+    projected = tensor_linear(model,name + Z_FFN_DOWN,gate,false);
+    residual = tensor_norm(projected,tensor_vector(model,name + Z_FFN_NORM2 WEIGHT_SUFFIX),COMPUTE_Z_NORM_EPSILON);
     z_residual(input,residual,timestep? &modulation : nullptr,3);
 #ifdef PIXELINA_WITH_VULKAN
     if (!vulkan_active_state())
@@ -369,9 +369,9 @@ PixTensor inference_diffuse(const PixModelFile &diffuser, const PixTensor &laten
         frequency.values[i] = std::cos(angle);
         frequency.values[i + Z_TIME_DIM / 2] = std::sin(angle);
     }
-    PixTensor timestep = tensor_linear(diffuser,"t_embedder.mlp.0",frequency,true);
+    PixTensor timestep = tensor_linear(diffuser,Z_TIME_FIRST,frequency,true);
     tensor_silu(timestep);
-    timestep = tensor_linear(diffuser,"t_embedder.mlp.2",timestep,true);
+    timestep = tensor_linear(diffuser,Z_TIME_SECOND,timestep,true);
     size_t patch_width = width / Z_PATCH_SIZE,patch_height = height / Z_PATCH_SIZE;
     PixTensor patches(patch_width * patch_height,Z_LATENT_CHANNELS * Z_PATCH_SIZE * Z_PATCH_SIZE);
 #ifdef PIXELINA_WITH_VULKAN
@@ -388,15 +388,15 @@ PixTensor inference_diffuse(const PixModelFile &diffuser, const PixTensor &laten
             }
         }
     }
-    PixTensor visual = z_pad(diffuser,tensor_linear(diffuser,"x_embedder",patches,true),"x_pad_token");
-    PixTensor caption = tensor_norm(conditioning,tensor_vector(diffuser,"cap_embedder.0.weight"),COMPUTE_Z_NORM_EPSILON);
-    caption = z_pad(diffuser,tensor_linear(diffuser,"cap_embedder.1",caption,true),"cap_pad_token");
+    PixTensor visual = z_pad(diffuser,tensor_linear(diffuser,Z_IMAGE_PROJECTION,patches,true),Z_IMAGE_PAD);
+    PixTensor caption = tensor_norm(conditioning,tensor_vector(diffuser,Z_CAPTION_NORM),COMPUTE_Z_NORM_EPSILON);
+    caption = z_pad(diffuser,tensor_linear(diffuser,Z_CAPTION_PROJECTION,caption,true),Z_CAPTION_PAD);
     if (visual.values.empty() || caption.values.empty()) return {};
     PixRotary caption_angles = z_rotary(caption.rows,conditioning.rows,0,0,false);
     PixRotary image_angles = z_rotary(visual.rows,patches.rows,caption.rows,patch_width,true);
     for (unsigned layer = 0; layer < Z_REFINERS; layer++) {
-        visual = z_block(diffuser,"noise_refiner." + std::to_string(layer) + ".",std::move(visual),image_angles,&timestep);
-        caption = z_block(diffuser,"context_refiner." + std::to_string(layer) + ".",std::move(caption),caption_angles,nullptr);
+        visual = z_block(diffuser,Z_NOISE_REFINER_PREFIX + std::to_string(layer) + TENSOR_NAME_SEPARATOR,std::move(visual),image_angles,&timestep);
+        caption = z_block(diffuser,Z_CONTEXT_REFINER_PREFIX + std::to_string(layer) + TENSOR_NAME_SEPARATOR,std::move(caption),caption_angles,nullptr);
         if (visual.values.empty() || caption.values.empty()) return {};
     }
     // Attention is permutation-equivariant; use SD.cpp's caption-first joint layout.
@@ -419,7 +419,7 @@ PixTensor inference_diffuse(const PixModelFile &diffuser, const PixTensor &laten
     angles.cosine.insert(angles.cosine.end(),image_angles.cosine.begin(),image_angles.cosine.end());
     angles.sine.insert(angles.sine.end(),image_angles.sine.begin(),image_angles.sine.end());
     for (unsigned layer = 0; layer < Z_LAYERS; layer++) {
-        joint = z_block(diffuser,"layers." + std::to_string(layer) + ".",std::move(joint),angles,&timestep);
+        joint = z_block(diffuser,Z_BLOCK_PREFIX + std::to_string(layer) + TENSOR_NAME_SEPARATOR,std::move(joint),angles,&timestep);
         if (joint.values.empty()) return {};
         if (progress && !progress(begin + span * float(layer + 1) / Z_LAYERS,"Diffuser block " + std::to_string(layer + 1) + "/" + std::to_string(Z_LAYERS))) return {};
     }
@@ -431,12 +431,12 @@ PixTensor inference_diffuse(const PixModelFile &diffuser, const PixTensor &laten
     joint = PixTensor();
     final_input = tensor_norm(final_input,{},COMPUTE_NORM_EPSILON,true);
     tensor_silu(timestep);
-    PixTensor scale = tensor_linear(diffuser,"final_layer.adaLN_modulation.1",timestep,true);
+    PixTensor scale = tensor_linear(diffuser,Z_OUTPUT_MODULATION,timestep,true);
 #ifdef PIXELINA_WITH_VULKAN
     if (vulkan_active_state()) vulkan_pointwise(VK_OP_MODULATE,final_input,&scale,nullptr); else
 #endif
     for (size_t i = 0; i < final_input.values.size(); i++) final_input.values[i] *= 1.0f + scale.values[i % Z_HIDDEN];
-    PixTensor prediction = tensor_linear(diffuser,"final_layer.linear",final_input,true);
+    PixTensor prediction = tensor_linear(diffuser,Z_OUTPUT_PROJECTION,final_input,true);
     PixTensor result(width * height,Z_LATENT_CHANNELS);
 #ifdef PIXELINA_WITH_VULKAN
     if (vulkan_active_state()) vulkan_layout(VK_OP_UNPATCH,prediction,result,width,Z_PATCH_SIZE); else
@@ -457,14 +457,14 @@ PixTensor inference_diffuse(const PixModelFile &diffuser, const PixTensor &laten
 
 static PixTensor vae_block(const PixModelFile &model, const std::string &name, PixTensor input, size_t width, size_t height)
 {
-    PixTensor hidden = tensor_groupnorm(model,name + ".norm1",input);
+    PixTensor hidden = tensor_groupnorm(model,name + VAE_NORM1_SUFFIX,input);
     tensor_silu(hidden);
-    hidden = tensor_conv(model,name + ".conv1",hidden,width,height);
-    hidden = tensor_groupnorm(model,name + ".norm2",hidden);
+    hidden = tensor_conv(model,name + VAE_CONV1_SUFFIX,hidden,width,height);
+    hidden = tensor_groupnorm(model,name + VAE_NORM2_SUFFIX,hidden);
     tensor_silu(hidden);
-    hidden = tensor_conv(model,name + ".conv2",hidden,width,height);
+    hidden = tensor_conv(model,name + VAE_CONV2_SUFFIX,hidden,width,height);
     if (hidden.values.empty()) return {};
-    if (input.channels != hidden.channels) input = tensor_conv(model,name + ".nin_shortcut",input,width,height);
+    if (input.channels != hidden.channels) input = tensor_conv(model,name + VAE_SHORTCUT_SUFFIX,input,width,height);
     tensor_add(hidden,input);
     return hidden;
 }
@@ -476,25 +476,25 @@ PixImage inference_decode(const PixModelFile &vae, PixTensor latents, size_t wid
     if (vulkan_active_state()) vulkan_pointwise(VK_OP_AFFINE,latents,nullptr,nullptr,0,1.0f / Z_VAE_SCALE,Z_VAE_SHIFT); else
 #endif
     for (float &value : latents.values) value = value / Z_VAE_SCALE + Z_VAE_SHIFT;
-    PixTensor hidden = tensor_conv(vae,"decoder.conv_in",latents,width,height);
-    hidden = vae_block(vae,"decoder.mid.block_1",std::move(hidden),width,height);
-    PixTensor normalized = tensor_groupnorm(vae,"decoder.mid.attn_1.norm",hidden);
-    PixTensor q = tensor_conv(vae,"decoder.mid.attn_1.q",normalized,width,height);
-    PixTensor k = tensor_conv(vae,"decoder.mid.attn_1.k",normalized,width,height);
-    PixTensor v = tensor_conv(vae,"decoder.mid.attn_1.v",normalized,width,height);
+    PixTensor hidden = tensor_conv(vae,VAE_INPUT_CONV,latents,width,height);
+    hidden = vae_block(vae,VAE_MID_BLOCK_FIRST,std::move(hidden),width,height);
+    PixTensor normalized = tensor_groupnorm(vae,VAE_ATTENTION_PREFIX VAE_NORM_SUFFIX,hidden);
+    PixTensor q = tensor_conv(vae,VAE_ATTENTION_PREFIX VAE_QUERY_SUFFIX,normalized,width,height);
+    PixTensor k = tensor_conv(vae,VAE_ATTENTION_PREFIX VAE_KEY_SUFFIX,normalized,width,height);
+    PixTensor v = tensor_conv(vae,VAE_ATTENTION_PREFIX VAE_VALUE_SUFFIX,normalized,width,height);
     PixTensor attention = tensor_attention(q,k,v,1,1,false);
-    tensor_add(hidden,tensor_conv(vae,"decoder.mid.attn_1.proj_out",attention,width,height));
+    tensor_add(hidden,tensor_conv(vae,VAE_ATTENTION_PREFIX VAE_PROJECTION_SUFFIX,attention,width,height));
     q = PixTensor();
     k = PixTensor();
     v = PixTensor();
     normalized = PixTensor();
     attention = PixTensor();
-    hidden = vae_block(vae,"decoder.mid.block_2",std::move(hidden),width,height);
+    hidden = vae_block(vae,VAE_MID_BLOCK_SECOND,std::move(hidden),width,height);
     if (hidden.values.empty()) return {};
     unsigned completed = 0;
     for (int level = Z_VAE_LEVELS - 1; level >= 0; level--) {
         for (int block = 0; block < Z_VAE_BLOCKS; block++) {
-            std::string name = std::string(VAE_UP_PREFIX) + std::to_string(level) + ".block." + std::to_string(block);
+            std::string name = std::string(VAE_UP_PREFIX) + std::to_string(level) + VAE_BLOCK_PREFIX + std::to_string(block);
             hidden = vae_block(vae,name,std::move(hidden),width,height);
             if (hidden.values.empty()) return {};
             completed++;
@@ -510,12 +510,12 @@ PixImage inference_decode(const PixModelFile &vae, PixTensor latents, size_t wid
             }
             width *= 2;
             height *= 2;
-            hidden = tensor_conv(vae,std::string(VAE_UP_PREFIX) + std::to_string(level) + ".upsample.conv",doubled,width,height);
+            hidden = tensor_conv(vae,std::string(VAE_UP_PREFIX) + std::to_string(level) + VAE_UPSAMPLE_SUFFIX,doubled,width,height);
         }
     }
-    hidden = tensor_groupnorm(vae,"decoder.norm_out",hidden);
+    hidden = tensor_groupnorm(vae,VAE_OUTPUT_NORM,hidden);
     tensor_silu(hidden);
-    hidden = tensor_conv(vae,"decoder.conv_out",hidden,width,height);
+    hidden = tensor_conv(vae,VAE_OUTPUT_CONV,hidden,width,height);
     if (!finite_tensor(hidden)) return {};
     PixImage image;
     image.width = int(width);

@@ -64,9 +64,9 @@ bool qwen_vl_validate(const PixModelFile &language, const PixModelFile &vision, 
         error = "Unsupported Qwen3-VL DeepStack layer selection.";
         return false;
     }
-    if (!qwen_vl_weight(language,QWEN_VL_EMBEDDING_WEIGHT,{QWEN_VL_HIDDEN,QWEN_VL_VOCABULARY},error) || !qwen_vl_weight(language,"output_norm.weight",{QWEN_VL_HIDDEN},error)) return false;
+    if (!qwen_vl_weight(language,QWEN_VL_EMBEDDING_WEIGHT,{QWEN_VL_HIDDEN,QWEN_VL_VOCABULARY},error) || !qwen_vl_weight(language,QWEN_CHAT_OUTPUT_NORM,{QWEN_VL_HIDDEN},error)) return false;
     for (size_t layer = 0; layer < QWEN_VL_LAYERS; layer++) {
-        std::string prefix = QWEN_VL_BLOCK_PREFIX + std::to_string(layer) + ".";
+        std::string prefix = QWEN_VL_BLOCK_PREFIX + std::to_string(layer) + TENSOR_NAME_SEPARATOR;
         const char* norms[] = {QWEN_VL_ATTENTION_NORM,QWEN_VL_FFN_NORM};
         for (const char* norm : norms) {
             if (!qwen_vl_weight(language,prefix + norm,{QWEN_VL_HIDDEN},error)) return false;
@@ -75,16 +75,16 @@ bool qwen_vl_validate(const PixModelFile &language, const PixModelFile &vision, 
         for (const char* head : heads) {
             if (!qwen_vl_weight(language,prefix + head,{QWEN_VL_HEAD_DIM},error)) return false;
         }
-        if (!qwen_vl_weight(language,prefix + "attn_q.weight",{QWEN_VL_HIDDEN,QWEN_VL_HIDDEN},error) || !qwen_vl_weight(language,prefix + "attn_output.weight",{QWEN_VL_HIDDEN,QWEN_VL_HIDDEN},error)) return false;
-        const char* kv[] = {"attn_k.weight","attn_v.weight"};
+        if (!qwen_vl_weight(language,prefix + QWEN_VL_QUERY WEIGHT_SUFFIX,{QWEN_VL_HIDDEN,QWEN_VL_HIDDEN},error) || !qwen_vl_weight(language,prefix + QWEN_VL_ATTENTION_OUTPUT WEIGHT_SUFFIX,{QWEN_VL_HIDDEN,QWEN_VL_HIDDEN},error)) return false;
+        const char* kv[] = {QWEN_VL_KEY WEIGHT_SUFFIX,QWEN_VL_VALUE WEIGHT_SUFFIX};
         for (const char* projection : kv) {
             if (!qwen_vl_weight(language,prefix + projection,{QWEN_VL_HIDDEN,QWEN_VL_KV_HEADS * QWEN_VL_HEAD_DIM},error)) return false;
         }
-        if (!qwen_vl_weight(language,prefix + "ffn_gate.weight",{QWEN_VL_HIDDEN,QWEN_VL_MLP},error) || !qwen_vl_weight(language,prefix + "ffn_up.weight",{QWEN_VL_HIDDEN,QWEN_VL_MLP},error) || !qwen_vl_weight(language,prefix + "ffn_down.weight",{QWEN_VL_MLP,QWEN_VL_HIDDEN},error)) return false;
+        if (!qwen_vl_weight(language,prefix + QWEN_VL_FFN_GATE WEIGHT_SUFFIX,{QWEN_VL_HIDDEN,QWEN_VL_MLP},error) || !qwen_vl_weight(language,prefix + QWEN_VL_FFN_UP WEIGHT_SUFFIX,{QWEN_VL_HIDDEN,QWEN_VL_MLP},error) || !qwen_vl_weight(language,prefix + QWEN_VL_FFN_DOWN WEIGHT_SUFFIX,{QWEN_VL_MLP,QWEN_VL_HIDDEN},error)) return false;
     }
     if (!qwen_vl_weight(vision,QWEN_VISION_PATCH_WEIGHT,{QWEN_VISION_PATCH,QWEN_VISION_PATCH,3,QWEN_VISION_HIDDEN},error) || !qwen_vl_weight(vision,QWEN_VISION_PATCH_SECOND_WEIGHT,{QWEN_VISION_PATCH,QWEN_VISION_PATCH,3,QWEN_VISION_HIDDEN},error) || !qwen_vl_weight(vision,QWEN_VISION_PATCH_BIAS,{QWEN_VISION_HIDDEN},error) || !qwen_vl_weight(vision,QWEN_VISION_POSITION_WEIGHT,{QWEN_VISION_HIDDEN,QWEN_VISION_POSITIONS},error)) return false;
     for (size_t layer = 0; layer < QWEN_VISION_LAYERS; layer++) {
-        std::string prefix = QWEN_VISION_BLOCK_PREFIX + std::to_string(layer) + ".";
+        std::string prefix = QWEN_VISION_BLOCK_PREFIX + std::to_string(layer) + TENSOR_NAME_SEPARATOR;
         const char* norms[] = {QWEN_VISION_ATTENTION_NORM,QWEN_VISION_FFN_NORM};
         for (const char* norm : norms) {
             if (!qwen_vl_weight(vision,prefix + norm + WEIGHT_SUFFIX,{QWEN_VISION_HIDDEN},error) || !qwen_vl_weight(vision,prefix + norm + BIAS_SUFFIX,{QWEN_VISION_HIDDEN},error)) return false;
@@ -99,12 +99,12 @@ bool qwen_vl_validate(const PixModelFile &language, const PixModelFile &vision, 
     size_t selected[] = QWEN_VISION_DEEP_LAYERS;
     for (size_t i = 0; i <= QWEN_VISION_DEEPSTACK; i++) {
         bool final = i == QWEN_VISION_DEEPSTACK;
-        std::string prefix = final? QWEN_VISION_MERGER_PREFIX : QWEN_VISION_DEEP_PREFIX + std::to_string(selected[i]) + ".";
+        std::string prefix = final? QWEN_VISION_MERGER_PREFIX : QWEN_VISION_DEEP_PREFIX + std::to_string(selected[i]) + TENSOR_NAME_SEPARATOR;
         std::string norm = final? QWEN_VISION_FINAL_NORM : prefix + QWEN_VISION_MERGER_NORM;
         size_t hidden = QWEN_VISION_HIDDEN * QWEN_VISION_MERGE_PIXELS;
         size_t normalized = final? QWEN_VISION_HIDDEN : hidden;
         if (!qwen_vl_weight(vision,norm + WEIGHT_SUFFIX,{normalized},error) || !qwen_vl_weight(vision,norm + BIAS_SUFFIX,{normalized},error)) return false;
-        std::string first = prefix + (final? "0" : QWEN_VISION_MERGER_FIRST),second = prefix + (final? "2" : QWEN_VISION_MERGER_SECOND);
+        std::string first = prefix + (final? QWEN_VISION_FINAL_MERGER_FIRST : QWEN_VISION_MERGER_FIRST),second = prefix + (final? QWEN_VISION_FINAL_MERGER_SECOND : QWEN_VISION_MERGER_SECOND);
         if (!qwen_vl_weight(vision,first + WEIGHT_SUFFIX,{hidden,hidden},error) || !qwen_vl_weight(vision,first + BIAS_SUFFIX,{hidden},error) || !qwen_vl_weight(vision,second + WEIGHT_SUFFIX,{hidden,QWEN_VL_HIDDEN},error) || !qwen_vl_weight(vision,second + BIAS_SUFFIX,{QWEN_VL_HIDDEN},error)) return false;
     }
     PixTokenz tokenizer;
@@ -216,9 +216,9 @@ static PixTensor qwen_vl_merger(const PixModelFile &vision, const PixTensor &inp
     shuffled.rows /= QWEN_VISION_MERGE_PIXELS;
     shuffled.channels *= QWEN_VISION_MERGE_PIXELS;
     if (!final) shuffled = qwen_vl_affine(vision,prefix + QWEN_VISION_MERGER_NORM,shuffled);
-    shuffled = tensor_linear(vision,prefix + (final? "0" : QWEN_VISION_MERGER_FIRST),shuffled,true);
+    shuffled = tensor_linear(vision,prefix + (final? QWEN_VISION_FINAL_MERGER_FIRST : QWEN_VISION_MERGER_FIRST),shuffled,true);
     tensor_gelu(shuffled,false);
-    return tensor_linear(vision,prefix + (final? "2" : QWEN_VISION_MERGER_SECOND),shuffled,true);
+    return tensor_linear(vision,prefix + (final? QWEN_VISION_FINAL_MERGER_SECOND : QWEN_VISION_MERGER_SECOND),shuffled,true);
 }
 
 PixVisionFeatures qwen_vl_vision(const PixModelFile &vision, const PixVLInput &input, const InferenceProgress &progress)
@@ -283,7 +283,7 @@ PixVisionFeatures qwen_vl_vision(const PixModelFile &vision, const PixVLInput &i
         positions = PixTensor();
         packed = PixTensor();
         for (size_t layer = 0; layer < QWEN_VISION_LAYERS; layer++) {
-            std::string prefix = QWEN_VISION_BLOCK_PREFIX + std::to_string(layer) + ".";
+            std::string prefix = QWEN_VISION_BLOCK_PREFIX + std::to_string(layer) + TENSOR_NAME_SEPARATOR;
             PixTensor normalized = qwen_vl_affine(vision,prefix + QWEN_VISION_ATTENTION_NORM,hidden);
             PixTensor qkv = tensor_linear(vision,prefix + QWEN_VISION_QKV,normalized,true);
             normalized = PixTensor();
@@ -303,7 +303,7 @@ PixVisionFeatures qwen_vl_vision(const PixModelFile &vision, const PixVLInput &i
             if (hidden.values.empty()) return {};
             for (size_t i = 0; i < QWEN_VISION_DEEPSTACK; i++) {
                 if (layer != selected[i]) continue;
-                PixTensor deep = qwen_vl_merger(vision,hidden,QWEN_VISION_DEEP_PREFIX + std::to_string(layer) + ".",false);
+                PixTensor deep = qwen_vl_merger(vision,hidden,QWEN_VISION_DEEP_PREFIX + std::to_string(layer) + TENSOR_NAME_SEPARATOR,false);
                 std::vector<size_t> rows(deep.rows);
                 std::iota(rows.begin(),rows.end(),features.offsets[reference]);
                 if (!tensor_scatter(features.deepstack[i],deep,rows)) return {};
@@ -357,9 +357,9 @@ PixTensor qwen_vl_forward(const PixModelFile &language, const PixVLInput &input,
     }
     for (size_t layer = 0; layer < QWEN_VL_LAYERS; layer++) {
         if (cache && progress && !progress(0,"Language block " + std::to_string(layer + 1))) return {};
-        std::string prefix = QWEN_VL_BLOCK_PREFIX + std::to_string(layer) + ".";
+        std::string prefix = QWEN_VL_BLOCK_PREFIX + std::to_string(layer) + TENSOR_NAME_SEPARATOR;
         PixTensor normalized = tensor_norm(hidden,tensor_vector(language,prefix + QWEN_VL_ATTENTION_NORM),QWEN_VL_EPSILON);
-        PixTensor q = tensor_linear(language,prefix + "attn_q",normalized,false),k = tensor_linear(language,prefix + "attn_k",normalized,false),v = tensor_linear(language,prefix + "attn_v",normalized,false);
+        PixTensor q = tensor_linear(language,prefix + QWEN_VL_QUERY,normalized,false),k = tensor_linear(language,prefix + QWEN_VL_KEY,normalized,false),v = tensor_linear(language,prefix + QWEN_VL_VALUE,normalized,false);
         normalized = PixTensor();
         size_t qrows = q.rows,krows = k.rows;
         q.rows *= QWEN_VL_HEADS;
@@ -392,10 +392,10 @@ PixTensor qwen_vl_forward(const PixModelFile &language, const PixVLInput &input,
             attended = tensor_attention(q,saved.key,saved.value,QWEN_VL_HEADS,QWEN_VL_KV_HEADS,{{0,q.rows,saved.key.rows,true}},cache->rows);
         } else attended = tensor_attention(q,k,v,QWEN_VL_HEADS,QWEN_VL_KV_HEADS,true);
         q = k = v = PixTensor();
-        tensor_add(hidden,tensor_linear(language,prefix + "attn_output",attended,false));
+        tensor_add(hidden,tensor_linear(language,prefix + QWEN_VL_ATTENTION_OUTPUT,attended,false));
         attended = PixTensor();
         normalized = tensor_norm(hidden,tensor_vector(language,prefix + QWEN_VL_FFN_NORM),QWEN_VL_EPSILON);
-        PixTensor gate = tensor_linear(language,prefix + "ffn_gate",normalized,false),up = tensor_linear(language,prefix + QWEN_VL_FFN_UP,normalized,false);
+        PixTensor gate = tensor_linear(language,prefix + QWEN_VL_FFN_GATE,normalized,false),up = tensor_linear(language,prefix + QWEN_VL_FFN_UP,normalized,false);
         normalized = PixTensor();
         tensor_silu(gate);
         tensor_gate(gate,up);

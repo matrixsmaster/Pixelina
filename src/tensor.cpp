@@ -156,11 +156,11 @@ std::vector<float> tensor_vector(const PixModelFile &model, const std::string &n
 PixTensor tensor_linear(const PixModelFile &model, const std::string &name, const PixTensor &input, bool bias)
 {
     if (input.values.empty()) return {};
-    const PixWeight &weight = model.tensor(name + ".weight");
+    const PixWeight &weight = model.tensor(name + WEIGHT_SUFFIX);
     PixTensor output(input.rows,size_t(weight.shape[1]));
     if (!cpu_matmul(model,weight,input.values.data(),input.rows,output.values.data())) return {};
     if (bias) {
-        std::vector<float> vector = tensor_vector(model,name + ".bias");
+        std::vector<float> vector = tensor_vector(model,name + BIAS_SUFFIX);
 #ifdef PIXELINA_WITH_VULKAN
         if (vulkan_active_state()) {
             vulkan_bias(output,vector);
@@ -457,7 +457,7 @@ PixTensor tensor_groupnorm(const PixModelFile &model, const std::string &name, c
 #ifdef PIXELINA_WITH_VULKAN
     if (vulkan_active_state()) return vulkan_groupnorm(model,name,input);
 #endif
-    std::vector<float> weight = tensor_vector(model,name + ".weight"),bias = tensor_vector(model,name + ".bias");
+    std::vector<float> weight = tensor_vector(model,name + WEIGHT_SUFFIX),bias = tensor_vector(model,name + BIAS_SUFFIX);
     PixTensor output(input.rows,input.channels);
     size_t group_size = input.channels / COMPUTE_VAE_GROUPS;
     auto run_rows = [&](size_t begin, size_t end) {
@@ -529,7 +529,7 @@ PixTensor tensor_resample_shortcut(const PixTensor &input, size_t width, size_t 
 PixTensor tensor_linear_rows(const PixModelFile &model, const std::string &name, const PixTensor &input, size_t first, size_t count)
 {
     if (input.values.empty()) return {};
-    auto found = model.weights.find(name + ".weight");
+    auto found = model.weights.find(name + WEIGHT_SUFFIX);
     if (found == model.weights.end()) return {};
     PixWeight weight = found->second;
     if (weight.shape.size() != 2 || input.channels != weight.shape[0] || first > weight.shape[1] || count > weight.shape[1] - first) return {};
@@ -537,7 +537,7 @@ PixTensor tensor_linear_rows(const PixModelFile &model, const std::string &name,
     weight.offset += first * stride;
     weight.shape[1] = count;
     weight.bytes = count * stride;
-    weight.name += ":" + std::to_string(first) + ":" + std::to_string(count);
+    weight.name += TENSOR_SLICE_SEPARATOR + std::to_string(first) + TENSOR_SLICE_SEPARATOR + std::to_string(count);
     PixTensor output(input.rows,count);
     if (!cpu_matmul(model,weight,input.values.data(),input.rows,output.values.data())) return {};
     return output;

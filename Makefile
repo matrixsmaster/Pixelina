@@ -12,8 +12,8 @@ LDLIBS += -pthread $(shell $(PKG_CONFIG) --libs sdl2)
 
 CORE := os storage image json model tokenizer tensor backend_cpu kernels_cpu kernels_quant backend_vulkan convolution inference qwen_image qwen_vl qwen_vae qwen_chat
 OBJECTS := $(addprefix src/,$(addsuffix .o,$(CORE)))
-APP_OBJECTS := $(OBJECTS) src/ui.o src/ui_about.o src/ui_sdl.o src/ui_refdlg.o src/ui_chatdlg.o src/dlg_bookimg.o src/pixuilib.o src/main.o
-HEADERS := $(wildcard src/*.h)
+APP_OBJECTS := $(OBJECTS) src/ui.o src/ui_about.o src/ui_sdl.o src/ui_refdlg.o src/ui_chatdlg.o src/ui_queue.o src/dlg_bookimg.o src/pixuilib.o src/main.o
+HEADERS := $(wildcard src/*.h third_party/*.h)
 ASSET_HEADERS := $(patsubst assets/%.jpg,assets/%_jpg.h,$(wildcard assets/*.jpg))
 
 ifeq ($(VULKAN),1)
@@ -61,12 +61,14 @@ tools/font: tools/font.cpp $(wildcard tools/*.h)
 
 .PHONY: install uninstall
 install: pixelina assets/pixelina_icon.png
-	install -d $(PREFIX)/bin $(PREFIX)/share/applications $(PREFIX)/share/icons/hicolor/128x128/apps
+	install -d $(PREFIX)/bin $(PREFIX)/share/applications $(PREFIX)/share/icons/hicolor/128x128/apps $(PREFIX)/share/pixelina
 	install -m755 pixelina $(PREFIX)/bin/pixelina
 	install -m644 pixelina.desktop $(PREFIX)/share/applications/pixelina.desktop
 	install -m644 assets/pixelina_icon.png $(PREFIX)/share/icons/hicolor/128x128/apps/pixelina.png
+	install -m644 themes/*.pixtheme $(PREFIX)/share/pixelina/
 	touch $(PREFIX)/share/icons/hicolor
 
 uninstall:
 	rm -f $(PREFIX)/bin/pixelina $(PREFIX)/share/applications/pixelina.desktop $(PREFIX)/share/icons/hicolor/128x128/apps/pixelina.png
+	rm -rf $(PREFIX)/share/pixelina
 	touch $(PREFIX)/share/icons/hicolor
