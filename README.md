@@ -4,14 +4,20 @@ Pixelina is a self-contained image generation, editing and viewer application wi
 
 Pixelina brings modern image generation capabilities to a nostalgic interface, proving that you don't need flashy UI frameworks to create beautiful art.
 
+![Pixelina UI](assets/ss1.webp)
+
+![Pixelina Dark UI](assets/ss-theme-witch.webp)
+
 ## Features
 
-- **Local text-to-image prototyping**: type a prompt, adjust seed, steps and shift, and generate arbitrarily sized images entirely offline. Reproducibility is guaranteed by seed and settings snapshot.
+- **Local text-to-image**: type a prompt, adjust seed, steps and shift, and generate arbitrarily sized images entirely offline. Reproducibility is guaranteed by seed and settings snapshot.
 - **Live Preview**: Watch generation progress in real-time as diffusion steps complete.
-- **Batch exploration**: keep a working directory with `pixelina.txt` database and generated JPG/PNG files. The carousel provides instant visual history; click to reload any previous generation with its exact prompt and parameters.
+- **Batch exploration**: keep a working directory with `pixelina.txt` database and generated files. The carousel provides instant visual history; click to reload any previous generation with its exact prompt and parameters.
 - **Model swapping**: point the diffuser, encoder and VAE fields to alternative files in the same format. Pixelina validates settings before generation and persists the last used models.
 - **Reference-guided editing**: open an existing image and edit it with a prompt and reference guidance using the Edit mode. Adjust seed, size, steps and reference resolution, add multiple reference images, and regenerate with consistent style or content.
 - **Visual chat**: open the Chat dialog from the Image menu and ask questions about the currently displayed image using Qwen-VL chat with streaming responses, thinking mode support and per-session conversation history. The chat reuses the Edit settings for model selection and can reference the image inline.
+- **Batch queue of jobs**: add jobs to a queue and start batch processing, stop or pause the queue. The queue supports import and export.
+- **Switchable themes**: switch between UI themes.
 - **Two creative workspaces**: switch between Generate for pure text-to-image and Edit for image-to-image workflows via the settings tabs. Each workspace remembers its own models and parameters.
 - **Open and clear canvas**: open single images directly for editing, or clear the canvas to start fresh without changing the working directory.
 - **Auto-seed**: let Pixelina advance the seed automatically after each generation to explore variations quickly.
@@ -43,7 +49,7 @@ Pixelina is built around a faithful Windows 3.11 desktop metaphor with system me
 
 The UI library `pixuilib` is written from scratch with no external GUI toolkit. Rendering is done via SDL2 as a thin canvas adapter, keeping the widget set minimal and portable.
 
-Version 0.3 adds the Chat workflow, refactored UI modules, persistent window and configuration storage, and improved multi-reference handling.
+Version 0.5 adds the Chat workflow, refactored UI modules, persistent window and configuration storage, and improved multi-reference handling.
 
 ## Build requirements
 
@@ -68,10 +74,18 @@ make VULKAN=1
 
 Run:
 ```
-pixelina [-p] [-t threads] [path]
+pixelina [-p] [-t threads] [-j job_file] [path]
 ```
 
-`-p` forces PNG output for Save, `-t threads` sets max CPU thread count for CPU-only inference, `path` selects working directory.
+`-p` forces PNG output for Save, `-t threads` sets max CPU thread count for CPU-only inference, `-j job_file` selects the job file, `path` selects working directory.
+
+## Themes
+
+Pixelina supports dark, pixie and witch themes. The theme can be switched at any time, and the last used theme is persisted.
+
+Custom themes can be created by following the format of the existing themes: each theme is defined by its colors and fonts.
+
+Fonts can be created with the font tool: `tools/font font.ttf NAME [width height] > font.txt`.
 
 ## Minimal dependency philosophy
 
